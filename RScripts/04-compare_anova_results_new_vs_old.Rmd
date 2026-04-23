@@ -223,6 +223,76 @@ ggsave(
 cat("Scatter plot saved.\n")
 ```
 
+# Volcano plot: new limma results
+
+```{r fig.width = 7, fig.height = 6}
+# Classify each probe for colouring:
+# Only probes meeting BOTH the FDR < 0.05 AND |logFC| >= 1 thresholds are
+# coloured. All other probes (non-significant, or significant but below the
+# fold-change cutoff) are plotted in grey.
+results_new <- results_new |>
+  dplyr::mutate(
+    direction = dplyr::case_when(
+      `stepup(p-value(GATA2 vs. con))` < 0.05 & `logFC(GATA2 vs. con)` >= 1  ~ "Up",
+      `stepup(p-value(GATA2 vs. con))` < 0.05 & `logFC(GATA2 vs. con)` <= -1 ~ "Down",
+      TRUE ~ "NS"
+    )
+  )
+
+# Count each group for subtitle annotation
+n_up   <- sum(results_new$direction == "Up")
+n_down <- sum(results_new$direction == "Down")
+n_ns   <- sum(results_new$direction == "NS")
+
+volcano_plot <- ggplot(results_new,
+                       aes(x = `logFC(GATA2 vs. con)`,
+                           y = -log10(`stepup(p-value(GATA2 vs. con))`),
+                           colour = direction)) +
+  geom_point(alpha = 0.5, size = 0.9) +
+  scale_colour_manual(
+    values = c("Up" = "firebrick", "Down" = "#2c7bb6", "NS" = "grey70"),
+    labels = c("Up"   = paste0("Upregulated in GATA2 (n = ", n_up, ")"),
+               "Down" = paste0("Downregulated in GATA2 (n = ", n_down, ")"),
+               "NS"   = paste0("Not significant (n = ", n_ns, ")")),
+    name = NULL
+  ) +
+  geom_vline(xintercept = c(-1, 1),
+             linetype   = "dotted",
+             colour     = "grey30",
+             linewidth  = 0.7) +
+  geom_hline(yintercept = -log10(0.05),
+             linetype   = "dashed",
+             colour     = "grey30",
+             linewidth  = 0.7) +
+  labs(
+    title    = "Volcano plot: GATA2 knockdown vs control",
+    subtitle = "FDR < 0.05 and |logFC| \u2265 1",
+    x        = "log2 Fold-Change (GATA2 vs. con)",
+    y        = expression(-log[10](FDR))
+  ) +
+  theme_bw(base_size = 13) +
+  theme(plot.title    = element_text(face = "bold"),
+        plot.subtitle = element_text(colour = "grey40"),
+        legend.position = "bottom",
+        legend.text     = element_text(size = 9))
+
+print(volcano_plot)
+```
+
+# Save volcano plot
+
+```{r}
+ggsave(
+  filename = file.path(out_dir, "volcano_GATA2_vs_con.png"),
+  plot     = volcano_plot,
+  width    = 8,
+  height   = 8,
+  dpi      = 300
+)
+
+cat("Volcano plot saved.\n")
+```
+
 # Session info for reproducibility
 
 ```{r}
