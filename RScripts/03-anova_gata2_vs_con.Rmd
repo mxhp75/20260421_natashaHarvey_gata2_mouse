@@ -1,0 +1,226 @@
+---
+title: "anova_gata2_vs_con"
+author: "Melanie Smith"
+date: "2026-04-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Clean-up environment
+
+```{r}
+rm(list = ls(all.names = TRUE)) # will clear all objects including hidden objects
+gc() # free up memory and report the memory usage
+options(max.print = .Machine$integer.max,
+        scipen = 999,
+        stringsAsFactors = FALSE,
+        dplyr.summarise.inform = FALSE) # Print everything without truncation, avoid scientific notation, keep strings as characters, silence dplyr's "grouped output" informational messages
+set.seed(42) # set seed for reproducibility
+```
+
+# Set project directories and file paths
+
+```{r}
+project_name <- "20260421_natashaHarvey_gata2_mouse"
+base_repo_dir <- "/home/melanie-smith/workDir/natashaHarvey"
+
+project_repo_dir <- file.path(base_repo_dir, project_name)
+
+processed_data <- file.path(project_repo_dir, "data", "processed")
+out_dir <- file.path(project_repo_dir, "outDir")
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+# Load libraries
+
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+required_pkgs <- c("limma")
+
+for (pkg in required_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    BiocManager::install(pkg, ask = FALSE, update = FALSE)
+  }
+  library(pkg, character.only = TRUE)
+}
+```
+
+# Load gene-level expression matrix
+
+```{r}
+# Load the gene-level matrix produced by script 02 (one row per gene,
+# best probe selected by highest mean expression across all samples)
+expr_annotated <- readRDS(file.path(processed_data, "expression_matrix_rma_gene_level.rds"))
+
+cat("Loaded gene-level expression matrix with", nrow(expr_annotated), "genes\n")
+```
+
+# Separate annotation columns from expression values
+
+```{r}
+# Annotation columns produced by script 02
+annot_cols <- c("PROBEID", "SYMBOL", "GENENAME", "ENSEMBL")
+
+# Grab the sample IDs (i.e. the CEL file sample columns)
+expr_cols <- setdiff(colnames(expr_annotated), annot_cols)
+
+# Split into annotation and numeric expression data frames
+annot_df <- expr_annotated[, annot_cols, drop = FALSE]
+expr_mat  <- as.matrix(expr_annotated[, expr_cols])
+rownames(expr_mat) <- expr_annotated$PROBEID
+
+cat("Annotation columns:", paste(annot_cols, collapse = ", "), "\n")
+cat("Expression columns (", length(expr_cols), " samples):\n", sep = "")
+print(expr_cols)
+```
+
+# Define sample groups from CEL filenames
+
+```{r}
+# Group labels are encoded in filenames as the second '_'-delimited field:
+#   JK_con_A_(MoGene-1_0-st-v1).CEL   -> "con"
+#   JK_GATA2_A_(MoGene-1_0-st-v1).CEL -> "GATA2"
+group_labels <- sub("^JK_([^_]+)_.*$", "\\1", expr_cols)
+
+# Coerce to factor with control as the reference level
+group <- factor(group_labels, levels = c("con", "GATA2"))
+# sanity check
+cat("Sample group assignments:\n")
+print(data.frame(sample = expr_cols, group = group))
+```
+
+# Build design matrix and fit linear model (limma)
+
+```{r}
+# One-way design: ~0 + group gives explicit group means (no intercept),
+# which makes the contrast definition straightforward
+design <- model.matrix(~0 + group)
+colnames(design) <- levels(group)
+
+cat("Design matrix:\n")
+print(design)
+
+fit <- lmFit(expr_mat, design)
+```
+
+# Define contrast: GATA2 knockdown vs control
+
+```{r}
+contrast_matrix <- makeContrasts(
+  GATA2_vs_con = GATA2 - con,
+  levels = design
+)
+
+fit2 <- contrasts.fit(fit, contrast_matrix)
+fit2 <- eBayes(fit2) # empirical Bayes moderation (produces moderated F-statistics)
+```
+
+# Extract full results table
+
+```{r}
+# Extract all probes, unsorted, no filtering
+results <- topTable(
+  fit2,
+  coef      = "GATA2_vs_con",
+  number     = Inf,
+  sort.by    = "none",
+  adjust.method = "BH" # Benjamini-Hochberg FDR correction (stepup p-value)
+  )
+
+cat("Results table dimensions:", nrow(results), "rows x", ncol(results), "columns\n")
+```
+
+# Merge results with probe annotations
+
+```{r}
+# Bring annotation columns back in alongside the limma statistics
+results$PROBEID <- rownames(results)
+
+results_annotated <- merge(
+  annot_df,
+  results,
+  by = "PROBEID",
+  all.y = TRUE
+)
+
+# Compute fold-change direction label to match old "Fold-Change (Description)" column
+results_annotated$FC_description <- ifelse(
+  results_annotated$logFC > 0, "Upregulated in GATA2",
+  ifelse(results_annotated$logFC < 0, "Downregulated in GATA2", "No change")
+)
+
+cat("Annotated results table dimensions:", nrow(results_annotated), "rows x",
+    ncol(results_annotated), "columns\n")
+```
+
+# Rename columns to match legacy TAC-style output
+
+```{r}
+# Annotation columns produced by script 02
+results_final <- results_annotated |>
+  dplyr::select(
+    `Transcript Cluster ID` = PROBEID,
+    `Gene Assignment`        = GENENAME,
+    `Gene Symbol`            = SYMBOL,
+    `mRNA Assignment`        = ENSEMBL,
+    `p-value(GATA2 vs. con)` = P.Value,
+    `stepup(p-value(GATA2 vs. con))` = adj.P.Val,
+    `logFC(GATA2 vs. con)`   = logFC,
+    `log-odds(B)`            = B,
+    `Fold-Change (Description)` = FC_description,
+    `AveExpr`                = AveExpr
+  )
+
+cat("Final column names:\n")
+print(colnames(results_final))
+```
+
+# Save full unfiltered results
+
+```{r}
+write.csv(
+  results_final,
+  file = file.path(out_dir, "ANOVA_GATA2_vs_con_full.csv"),
+  row.names = FALSE,
+  quote = FALSE
+)
+
+saveRDS(
+  results_final,
+  file = file.path(out_dir, "ANOVA_GATA2_vs_con_full.rds")
+)
+
+cat("Results saved to:", file.path(out_dir, "ANOVA_GATA2_vs_con_full.csv"), "\n")
+```
+
+# Quick summary of results
+
+```{r}
+cat("--- Results summary ---\n")
+cat("Total probes tested:", nrow(results_final), "\n")
+cat("Probes with FDR < 0.05:",
+    sum(results_final$`stepup(p-value(GATA2 vs. con))` < 0.05, na.rm = TRUE), "\n")
+cat("Probes with FDR < 0.01:",
+    sum(results_final$`stepup(p-value(GATA2 vs. con))` < 0.01, na.rm = TRUE), "\n")
+cat("Upregulated in GATA2 (logFC > 0, FDR < 0.05):",
+    sum(results_final$`logFC(GATA2 vs. con)` > 0 &
+          results_final$`stepup(p-value(GATA2 vs. con))` < 0.05, na.rm = TRUE), "\n")
+cat("Downregulated in GATA2 (logFC < 0, FDR < 0.05):",
+    sum(results_final$`logFC(GATA2 vs. con)` < 0 &
+          results_final$`stepup(p-value(GATA2 vs. con))` < 0.05, na.rm = TRUE), "\n")
+```
+
+# Session info for reproducibility
+
+```{r}
+writeLines(capture.output(sessionInfo()),
+           file.path(out_dir, "sessionInfo_anova.txt"))
+
+cat("ANOVA complete.\n")
+```

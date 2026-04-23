@@ -1,0 +1,180 @@
+---
+title: "probe_to_gene_mapping"
+author: "Melanie Smith"
+date: "2026-04-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Clean-up environment
+
+```{r}
+rm(list = ls(all.names = TRUE)) # will clear all objects includuing hidden objects
+gc() # free up memory and report the memory usage
+options(max.print = .Machine$integer.max,
+        scipen = 999,
+        stringsAsFactors = FALSE,
+        dplyr.summarise.inform = FALSE) # Print everything without truncation, avoid scientific notation, keep strings as characters, silence dplyr’s “grouped output” informational me>
+set.seed(42) # set seed for reproducibility
+```
+
+# Set project directories and file paths
+
+```{r}
+project_name <- "20260421_natashaHarvey_gata2_mouse"
+base_repo_dir <- "/home/melanie-smith/workDir/natashaHarvey"
+
+project_repo_dir <- file.path(base_repo_dir, project_name)
+
+raw_data <- file.path(project_repo_dir, "data", "raw")
+processed_data <- file.path(project_repo_dir, "data", "processed")
+out_dir <- file.path(project_repo_dir, "outDir")
+
+```
+
+# Load Libraries
+
+```{r}
+# if (!requireNamespace("mogene10sttranscriptcluster.db", quietly = TRUE)) {
+#   BiocManager::install("mogene10sttranscriptcluster.db", ask = FALSE)
+#   }
+library(mogene10sttranscriptcluster.db)
+library(AnnotationDbi)
+```
+
+# Load expression data
+
+```{r}
+expr_matrix <- readRDS(file.path(processed_data, "expression_matrix_rma.rds"))
+
+cat("Loaded expression matrix with", nrow(expr_matrix), "features\n")
+```
+
+# Extract probe IDs
+
+```{r}
+probe_ids <- rownames(expr_matrix)
+```
+
+# Map to gene annotations
+
+```{r}
+# fetch the annotations so we can map the probe IDs to the gene symbols
+annotations <- AnnotationDbi::select(
+  mogene10sttranscriptcluster.db,
+  keys = probe_ids,
+  columns = c("SYMBOL", "GENENAME", "ENSEMBL"),
+  keytype = "PROBEID"
+  )
+
+# Inspect mapping
+# we know the ~20-60% of probes won't have any gene information to map to so let's take a look and see what we have
+# give me 10 rows where the ENSEMBL annotation is not NA
+annotations[!is.na(annotations$ENSEMBL), ][1:10, ]
+
+# What percentage of probes actually mapped to Ensembl IDs
+mean(is.na(annotations$ENSEMBL))
+# [1] 0.2758796
+
+# create an annotations file with only mapped probe IDs
+annotations_clean <- annotations[!is.na(annotations$SYMBOL), ]
+```
+
+# Merge with expression matrix
+
+```{r}
+annotations_unique <- annotations_clean[!duplicated(annotations_clean$PROBEID), ]
+
+expr_annotated <- merge(
+  annotations_unique,
+  expr_matrix,
+  by.x = "PROBEID",
+  by.y = "row.names",
+  all.y = TRUE
+  )
+
+# let's take a look at the expression matrix with gene symbls
+expr_annotated[!is.na(expr_annotated$SYMBOL), ][1:20, ]
+expr_annotated[!is.na(expr_annotated$ENSEMBL), ][1:20, ]
+```
+
+# Save probe-level annotated matrix
+
+```{r}
+# Save the full probe-level annotated matrix before collapsing
+# This preserves the ability to return to probe-level data if needed downstream
+write.csv(
+  expr_annotated,
+  file = file.path(processed_data, "expression_matrix_rma_annotated.csv"),
+  row.names = FALSE,
+  quote = FALSE
+  )
+
+saveRDS(expr_annotated,
+        file = file.path(processed_data, "expression_matrix_rma_annotated.rds"))
+
+cat("Probe-level annotated matrix saved:", nrow(expr_annotated), "probes\n")
+```
+
+# Collapse probes to gene level (highest mean expression per gene)
+
+```{r}
+# Identify expression columns (all columns that are not annotation fields)
+annot_cols <- c("PROBEID", "SYMBOL", "GENENAME", "ENSEMBL")
+expr_cols   <- setdiff(colnames(expr_annotated), annot_cols)
+
+# Compute mean expression across all samples for each probe
+expr_annotated$mean_expr <- rowMeans(expr_annotated[, expr_cols], na.rm = TRUE)
+
+# For each gene symbol, retain only the probe with the highest mean expression
+# Order by descending mean expression so the first occurrence per SYMBOL is the best probe
+expr_annotated_ordered <- expr_annotated[order(expr_annotated$SYMBOL,
+                                               -expr_annotated$mean_expr), ]
+
+expr_gene_level <- expr_annotated_ordered[!duplicated(expr_annotated_ordered$SYMBOL), ]
+
+# Drop the helper column now that collapsing is done
+expr_gene_level$mean_expr <- NULL
+
+cat("Probes before collapsing: ", nrow(expr_annotated), "\n")
+cat("Genes after collapsing:   ", nrow(expr_gene_level), "\n")
+```
+
+# Inspect gene-level matrix
+
+```{r}
+# Confirm structure looks correct
+cat("Gene-level matrix dimensions:", nrow(expr_gene_level), "genes x",
+    ncol(expr_gene_level), "columns\n")
+
+# Preview first few rows
+head(expr_gene_level[, c("PROBEID", "SYMBOL", "GENENAME", expr_cols[1:4])])
+```
+
+# Save gene-level matrix
+
+```{r}
+write.csv(
+  expr_gene_level,
+  file = file.path(processed_data, "expression_matrix_rma_gene_level.csv"),
+  row.names = FALSE,
+  quote = FALSE
+  )
+
+saveRDS(expr_gene_level,
+        file = file.path(processed_data, "expression_matrix_rma_gene_level.rds"))
+
+cat("Gene-level matrix saved:", nrow(expr_gene_level), "genes\n")
+cat("Annotation complete.\n")
+```
+
+# Session info for reproducibility
+
+```{r}
+writeLines(capture.output(sessionInfo()),
+           file.path(out_dir, "sessionInfo_annotation.txt"))
+```
+

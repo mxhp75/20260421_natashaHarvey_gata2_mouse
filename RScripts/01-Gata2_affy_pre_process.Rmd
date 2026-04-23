@@ -1,0 +1,129 @@
+---
+title: "Gata2_affy_pre_process"
+author: "Melanie Smith"
+date: "2026-04-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Clean-up environment
+
+```{r}
+rm(list = ls(all.names = TRUE)) # will clear all objects includuing hidden objects
+gc() # free up memory and report the memory usage
+options(max.print = .Machine$integer.max,
+        scipen = 999,
+        stringsAsFactors = FALSE,
+        dplyr.summarise.inform = FALSE) # Print everything without truncation, avoid scientific notation, keep strings as characters, silence dplyr’s “grouped output” informational me>
+set.seed(42) # set seed for reproducibility
+```
+
+# Set project directories and file paths
+
+```{r}
+project_name <- "20260421_natashaHarvey_gata2_mouse"
+base_repo_dir <- "/home/melanie-smith/workDir/natashaHarvey"
+
+project_repo_dir <- file.path(base_repo_dir, project_name)
+
+raw_data <- file.path(project_repo_dir, "data", "raw")
+processed_data <- file.path(project_repo_dir, "data", "processed")
+out_dir <- file.path(project_repo_dir, "outDir")
+
+
+```
+
+# Load Libraries
+
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+install.packages("BiocManager")
+
+required_pkgs <- c("oligo", "pd.mogene.1.0.st.v1", "limma")
+
+for (pkg in required_pkgs) {
+if (!requireNamespace(pkg, quietly = TRUE)) {
+BiocManager::install(pkg, ask = FALSE, update = FALSE)
+}
+library(pkg, character.only = TRUE)
+}
+```
+
+# Locate CEL files
+
+```{r}
+# cel_dir <- file.path("data", "raw")
+cel_files <- list.celfiles(raw_data, full.names = TRUE)
+
+# Ensure reproducible ordering
+cel_files <- sort(cel_files)
+
+if (length(cel_files) == 0) {
+stop("No CEL files found.")
+}
+
+cat("Found", length(cel_files), "CEL files\n")
+```
+
+# Read CEL files 
+
+```{r}
+raw_data <- read.celfiles(cel_files)
+
+```
+
+# Quality control (basic)
+
+```{r}
+sample_names <- sampleNames(raw_data)
+print(sample_names)
+```
+
+# RMA normalization
+
+```{r}
+# background correction, normalisation, calculate expression
+norm_data <- rma(raw_data)
+```
+
+# Extract expression matrix
+
+```{r}
+# get expression estimates
+expr_matrix <- exprs(norm_data)
+```
+
+# Save outputs
+
+```{r}
+dir.create("data/processed", showWarnings = FALSE)
+
+write.csv(expr_matrix,
+          file = file.path(processed_data, "expression_matrix_rma.csv"),
+          quote = FALSE)
+saveRDS(expr_matrix, file = file.path(processed_data, "expression_matrix_rma.rds"))
+
+saveRDS(norm_data,
+        file = file.path(processed_data, "norm_data_rma.rds"))
+```
+
+# Save sample metadata
+
+```{r}
+pheno <- pData(norm_data)
+write.csv(pheno,
+          file = file.path(processed_data, "sample_metadata.csv"),
+          quote = FALSE)
+```
+
+# Session info for reproducibility
+
+```{r}
+writeLines(capture.output(sessionInfo()),
+           file.path(out_dir, "sessionInfo.txt"))
+
+cat("Processing complete.\n")
+```
