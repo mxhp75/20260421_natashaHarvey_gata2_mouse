@@ -29,9 +29,11 @@ base_repo_dir <- "/home/melanie-smith/workDir/natashaHarvey"
 
 project_repo_dir <- file.path(base_repo_dir, project_name)
 
-raw_data <- file.path(project_repo_dir, "data", "raw")
-processed_data <- file.path(project_repo_dir, "data", "processed")
+raw_data_dir <- file.path(project_repo_dir, "data", "raw")
+processed_data_dir <- file.path(project_repo_dir, "data", "processed")
+dir.create(processed_data, recursive = TRUE, showWarnings = FALSE)
 out_dir <- file.path(project_repo_dir, "outDir")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 
 ```
@@ -56,7 +58,7 @@ library(pkg, character.only = TRUE)
 
 ```{r}
 # cel_dir <- file.path("data", "raw")
-cel_files <- list.celfiles(raw_data, full.names = TRUE)
+cel_files <- list.celfiles(raw_data_dir, full.names = TRUE)
 
 # Ensure reproducible ordering
 cel_files <- sort(cel_files)
@@ -99,8 +101,6 @@ expr_matrix <- exprs(norm_data)
 # Save outputs
 
 ```{r}
-dir.create("data/processed", showWarnings = FALSE)
-
 write.csv(expr_matrix,
           file = file.path(processed_data, "expression_matrix_rma.csv"),
           quote = FALSE)
