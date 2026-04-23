@@ -1,0 +1,235 @@
+---
+title: "compare_anova_results_new_vs_old"
+author: "Melanie Smith"
+date: "2026-04-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Clean-up environment
+
+```{r}
+rm(list = ls(all.names = TRUE)) # will clear all objects including hidden objects
+gc() # free up memory and report the memory usage
+options(max.print = .Machine$integer.max,
+        scipen = 999,
+        stringsAsFactors = FALSE,
+        dplyr.summarise.inform = FALSE) # Print everything without truncation, avoid scientific notation, keep strings as characters, silence dplyr's "grouped output" informational messages
+set.seed(42) # set seed for reproducibility
+```
+
+# Set project directories and file paths
+
+```{r}
+project_name <- "20260421_natashaHarvey_gata2_mouse"
+base_repo_dir <- "/home/melanie-smith/workDir/natashaHarvey"
+
+project_repo_dir <- file.path(base_repo_dir, project_name)
+
+processed_data <- file.path(project_repo_dir, "data", "processed")
+out_dir        <- file.path(project_repo_dir, "outDir")
+downloads_dir  <- file.path(project_repo_dir, "downloads", "Jan_ANOVA_con_vs_GATA2_mouse")
+```
+
+# Load libraries
+
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+required_pkgs <- c("readxl", "dplyr", "ggplot2")
+
+for (pkg in required_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+  library(pkg, character.only = TRUE)
+}
+```
+
+# Load new ANOVA results (script 03 output)
+
+```{r}
+results_new <- readRDS(file.path(out_dir, "ANOVA_GATA2_vs_con_full.rds"))
+
+cat("New results dimensions:", nrow(results_new), "rows x", ncol(results_new), "cols\n")
+cat("New results column names:\n")
+print(colnames(results_new))
+```
+
+# Load old ANOVA results (.xls)
+
+```{r}
+old_xls_path <- file.path(downloads_dir, "Jan ANOVA con vs GATA2 mouse.xls")
+
+results_old <- readxl::read_xls(old_xls_path)
+
+cat("Old results dimensions:", nrow(results_old), "rows x", ncol(results_old), "cols\n")
+cat("Old results column names:\n")
+print(colnames(results_old))
+```
+
+# Inspect old results table
+
+```{r}
+# Preview first few rows to understand structure and confirm key column content
+head(results_old, 10)
+```
+
+# Standardise join key (Transcript Cluster ID / PROBEID)
+
+```{r}
+# Coerce both ID columns to character to avoid any type mismatch on join
+results_new <- results_new |>
+  dplyr::rename(probe_id = `Transcript Cluster ID`) |>
+  dplyr::mutate(probe_id = as.character(probe_id))
+
+# Identify the Transcript Cluster ID column in the old table
+# (column name may differ slightly from the new table)
+old_id_col <- "Transcript Cluster ID"
+stopifnot("Expected ID column not found in old results" = old_id_col %in% colnames(results_old))
+
+results_old <- results_old |>
+  dplyr::rename(probe_id = all_of(old_id_col)) |>
+  dplyr::mutate(probe_id = as.character(probe_id))
+```
+
+# Check probe ID overlap
+
+```{r}
+ids_new <- results_new$probe_id
+ids_old <- results_old$probe_id
+
+n_new        <- length(ids_new)
+n_old        <- length(ids_old)
+n_shared     <- length(intersect(ids_new, ids_old))
+n_only_new   <- length(setdiff(ids_new, ids_old))
+n_only_old   <- length(setdiff(ids_old, ids_new))
+
+cat("---------------------------------------\n")
+cat("Probe ID overlap summary\n")
+cat("---------------------------------------\n")
+cat("Probes in new results only:          ", n_new, "\n")
+cat("Probes in old results only:          ", n_old, "\n")
+cat("Probes shared (intersection):        ", n_shared, "\n")
+cat("Probes unique to new results:        ", n_only_new, "\n")
+cat("Probes unique to old results:        ", n_only_old, "\n")
+cat("Overlap as % of new results:         ",
+    round(n_shared / n_new * 100, 1), "%\n")
+cat("Overlap as % of old results:         ",
+    round(n_shared / n_old * 100, 1), "%\n")
+cat("---------------------------------------\n")
+```
+
+# Join tables on shared probe IDs
+
+```{r}
+# We use an inner join, retaining only the 21,312 probe IDs present in both tables.
+# The ~6,958 probes unique to the old table are the redundant probes that were
+# collapsed away in our pipeline (script 02) — their absence here is expected
+# and does not represent data loss. The 13 probes unique to our new results are
+# negligible annotation edge cases and are also excluded.
+results_joined <- dplyr::inner_join(
+  results_new |> dplyr::select(probe_id,
+                                `Gene Symbol`,
+                                logFC_new = `logFC(GATA2 vs. con)`,
+                                fdr_new   = `stepup(p-value(GATA2 vs. con))`),
+  results_old |> dplyr::select(probe_id,
+                                ratio_old = `Ratio(GATA2 vs. con)`,
+                                fdr_old   = `stepup(p-value(GATA2 vs. con))`),
+  by = "probe_id"
+)
+
+cat("Joined table dimensions:", nrow(results_joined), "rows x",
+    ncol(results_joined), "cols\n")
+```
+
+
+# Log2-transform the old ratio column
+
+```{r}
+# The old pipeline (TAC) reports fold-change as a linear ratio:
+# values > 1 mean upregulated in GATA2 (e.g. 2.0 = twice as expressed),
+# values < 1 mean downregulated (e.g. 0.5 = half as expressed).
+#
+# Our new limma pipeline reports fold-change on a log2 scale:
+# positive values mean upregulated, negative values mean downregulated
+# (e.g. log2(2) = 1, log2(0.5) = -1).
+#
+# To compare the two results on the same axis we log2-transform the old
+# linear ratio. This puts both measures on an equivalent scale where
+# 0 = no change, positive = up, negative = down, and the magnitude is
+# directly comparable. We can verify the transformation is sensible:
+# the old ratio range was 0.07 to 9.55, which becomes log2 ~-3.9 to 3.25,
+# consistent with our new logFC range of -3.58 to 3.18.
+results_joined <- results_joined |>
+  dplyr::mutate(logFC_old = log2(ratio_old))
+
+cat("Old ratio -> log2FC summary:\n")
+print(summary(results_joined$logFC_old))
+cat("\nNew logFC summary:\n")
+print(summary(results_joined$logFC_new))
+```
+
+# Scatter plot: logFC old vs new
+
+```{r fig.width = 7, fig.height = 6}
+# Correlation coefficient for annotation on plot
+r_val <- round(cor(results_joined$logFC_old,
+                   results_joined$logFC_new,
+                   use = "complete.obs"), 3)
+scatter_plot <- ggplot(results_joined,
+                       aes(x = logFC_old, y = logFC_new)) +
+  geom_point(alpha = 0.3, size = 0.8, colour = "#2c7bb6") +
+  geom_abline(intercept = 0, slope = 1,
+              linetype   = "dashed",
+              colour     = "firebrick",
+              linewidth  = 0.7) +
+  annotate("text",
+           x    = -Inf, y = Inf,
+           hjust = -0.15, vjust = 1.5,
+           label = paste0("r = ", r_val),
+           size  = 4.5) +
+  labs(
+    title    = "logFC comparison: new (limma) vs old (TAC) ANOVA",
+    subtitle = paste0("Inner join on probe ID | n = ",
+                      format(nrow(results_joined), big.mark = ","),
+                      " probes"),
+    x        = "Old results: log2(Ratio) [TAC]",
+    y        = "New results: logFC [limma]",
+    caption  = "Dashed red line = perfect concordance (slope = 1, intercept = 0)"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(plot.title    = element_text(face = "bold"),
+        plot.subtitle = element_text(colour = "grey40"),
+        plot.caption  = element_text(colour = "grey50", size = 9))
+
+print(scatter_plot)
+```
+
+# Save scatter plot
+
+```{r}
+ggsave(
+  filename = file.path(out_dir, "scatter_logFC_new_vs_old.png"),
+  plot     = scatter_plot,
+  width    = 7,
+  height   = 6,
+  dpi      = 300
+)
+cat("Scatter plot saved.\n")
+```
+
+# Session info for reproducibility
+
+```{r}
+writeLines(capture.output(sessionInfo()),
+           file.path(out_dir, "sessionInfo_comparison.txt"))
+
+cat("Comparison complete.\n")
+```
+
+
