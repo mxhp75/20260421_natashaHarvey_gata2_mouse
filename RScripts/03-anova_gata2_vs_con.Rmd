@@ -1,5 +1,5 @@
 ---
-title: "anova_gata2_vs_con"
+title: "lmFit_gata2_vs_con"
 author: "Melanie Smith"
 date: "2026-04-22"
 output: html_document
@@ -186,17 +186,17 @@ print(colnames(results_final))
 ```{r}
 write.csv(
   results_final,
-  file = file.path(out_dir, "ANOVA_GATA2_vs_con_full.csv"),
+  file = file.path(out_dir, "lmFit_GATA2_vs_con_full.csv"),
   row.names = FALSE,
   quote = FALSE
 )
 
 saveRDS(
   results_final,
-  file = file.path(out_dir, "ANOVA_GATA2_vs_con_full.rds")
+  file = file.path(out_dir, "lmFit_GATA2_vs_con_full.rds")
 )
 
-cat("Results saved to:", file.path(out_dir, "ANOVA_GATA2_vs_con_full.csv"), "\n")
+cat("Results saved to:", file.path(out_dir, "lmFit_GATA2_vs_con_full.csv"), "\n")
 ```
 
 # Quick summary of results
@@ -220,7 +220,7 @@ cat("Downregulated in GATA2 (logFC < 0, FDR < 0.05):",
 
 ```{r}
 writeLines(capture.output(sessionInfo()),
-           file.path(out_dir, "sessionInfo_anova.txt"))
+           file.path(out_dir, "sessionInfo_lmFit.txt"))
 
-cat("ANOVA complete.\n")
+cat("DE complete.\n")
 ```

@@ -1,5 +1,5 @@
 ---
-title: "compare_anova_results_new_vs_old"
+title: "compare_lmFit_results_new_vs_old_ANOVA"
 author: "Melanie Smith"
 date: "2026-04-22"
 output: html_document
@@ -50,10 +50,10 @@ for (pkg in required_pkgs) {
 }
 ```
 
-# Load new ANOVA results (script 03 output)
+# Load new limma lmFit results (script 03 output)
 
 ```{r}
-results_new <- readRDS(file.path(out_dir, "ANOVA_GATA2_vs_con_full.rds"))
+results_new <- readRDS(file.path(out_dir, "lmFit_GATA2_vs_con_full.rds"))
 
 cat("New results dimensions:", nrow(results_new), "rows x", ncol(results_new), "cols\n")
 cat("New results column names:\n")
