@@ -184,9 +184,17 @@ print(colnames(results_final))
 # Save full unfiltered results
 
 ```{r}
-write.csv(
+# write.csv(
+#   results_final,
+#   file = file.path(out_dir, "lmFit_GATA2_vs_con_full.csv"),
+#   row.names = FALSE,
+#   quote = FALSE
+# )
+
+write.table(
   results_final,
-  file = file.path(out_dir, "lmFit_GATA2_vs_con_full.csv"),
+  file = file.path(out_dir, "lmFit_GATA2_vs_con_full.txt"),
+  sep = "\t",
   row.names = FALSE,
   quote = FALSE
 )
