@@ -31,11 +31,9 @@ project_repo_dir <- file.path(base_repo_dir, project_name)
 
 raw_data_dir <- file.path(project_repo_dir, "data", "raw")
 processed_data_dir <- file.path(project_repo_dir, "data", "processed")
-dir.create(processed_data, recursive = TRUE, showWarnings = FALSE)
+dir.create(processed_data_dir, recursive = TRUE, showWarnings = FALSE)
 out_dir <- file.path(project_repo_dir, "outDir")
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
-
-
 ```
 
 # Load Libraries
@@ -47,11 +45,11 @@ install.packages("BiocManager")
 required_pkgs <- c("oligo", "pd.mogene.1.0.st.v1", "limma")
 
 for (pkg in required_pkgs) {
-if (!requireNamespace(pkg, quietly = TRUE)) {
-BiocManager::install(pkg, ask = FALSE, update = FALSE)
-}
-library(pkg, character.only = TRUE)
-}
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    BiocManager::install(pkg, ask = FALSE, update = FALSE)
+    }
+  library(pkg, character.only = TRUE)
+  }
 ```
 
 # Locate CEL files
@@ -102,12 +100,12 @@ expr_matrix <- exprs(norm_data)
 
 ```{r}
 write.csv(expr_matrix,
-          file = file.path(processed_data, "expression_matrix_rma.csv"),
+          file = file.path(processed_data_dir, "expression_matrix_rma.csv"),
           quote = FALSE)
-saveRDS(expr_matrix, file = file.path(processed_data, "expression_matrix_rma.rds"))
+saveRDS(expr_matrix, file = file.path(processed_data_dir, "expression_matrix_rma.rds"))
 
 saveRDS(norm_data,
-        file = file.path(processed_data, "norm_data_rma.rds"))
+        file = file.path(processed_data_dir, "norm_data_rma.rds"))
 ```
 
 # Save sample metadata
