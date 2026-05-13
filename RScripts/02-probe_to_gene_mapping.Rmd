@@ -79,13 +79,14 @@ annotations[!is.na(annotations$ENSEMBL), ][1:10, ]
 mean(is.na(annotations$ENSEMBL))
 # [1] 0.2758796
 
-# create an annotations file with only mapped probe IDs
+# create an annotations file with only mapped probe IDs (i.e. where SYMBOL is not NA)
 annotations_clean <- annotations[!is.na(annotations$SYMBOL), ]
 ```
 
 # Merge with expression matrix
 
 ```{r}
+# keep only the first instance of a duplicated PROBEID
 annotations_unique <- annotations_clean[!duplicated(annotations_clean$PROBEID), ]
 
 expr_annotated <- merge(
