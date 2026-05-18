@@ -113,7 +113,7 @@ saveRDS(norm_data,
 ```{r}
 pheno <- pData(norm_data)
 write.csv(pheno,
-          file = file.path(processed_data, "sample_metadata.csv"),
+          file = file.path(processed_data_dir, "sample_metadata.csv"),
           quote = FALSE)
 ```
 

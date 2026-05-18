@@ -33,6 +33,14 @@ raw_data <- file.path(project_repo_dir, "data", "raw")
 processed_data <- file.path(project_repo_dir, "data", "processed")
 out_dir <- file.path(project_repo_dir, "outDir")
 
+# verify required output directories exist
+for (d in c(processed_data, out_dir)) {
+  if (!dir.exists(d)) {
+    stop("Required directory does not exist: ", d,
+         "\nCreate it or update the path before re-running.")
+  }
+}
+
 ```
 
 # Load Libraries
@@ -50,7 +58,12 @@ library(AnnotationDbi)
 ```{r}
 expr_matrix <- readRDS(file.path(processed_data, "expression_matrix_rma.rds"))
 
-cat("Loaded expression matrix with", nrow(expr_matrix), "features\n")
+# Confirm the object is a numeric matrix (not a data frame or other class)
+stopifnot(is.matrix(expr_matrix), is.numeric(expr_matrix))
+
+cat("Loaded expression matrix with", nrow(expr_matrix), "probes and",
+    ncol(expr_matrix), "samples\n")
+
 ```
 
 # Extract probe IDs
