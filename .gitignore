@@ -53,10 +53,11 @@ rsconnect/
 *.cel
 
 # Results
-outdir/*
+*./outdir/*
 
 # Raw Data
 data/raw/*
 !data/raw/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
+downloads/*
