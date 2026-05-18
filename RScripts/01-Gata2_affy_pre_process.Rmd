@@ -1,0 +1,477 @@
+---
+title: "Gata2_affy_pre_process"
+author: "Melanie Smith"
+date: "2026-04-21"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 6)
+```
+
+# Clean-up environment
+
+```{r}
+# clear all objects including hidden objects
+rm(list = ls(all.names = TRUE))
+# free up ram
+gc()
+# set some default options
+options(
+  max.print        = .Machine$integer.max,
+  scipen           = 999,
+  stringsAsFactors = FALSE,
+  dplyr.summarise.inform = FALSE
+)
+# set seed for reproducibility
+set.seed(42)
+```
+
+# Set project directories and file paths
+
+```{r}
+project_name     <- "20260421_natashaHarvey_gata2_mouse"
+base_repo_dir    <- "/home/melanie-smith/workDir/natashaHarvey"
+
+project_repo_dir   <- file.path(base_repo_dir, project_name)
+raw_data_dir       <- file.path(project_repo_dir, "data", "raw")
+processed_data_dir <- file.path(project_repo_dir, "data", "processed")  # consistent name throughout
+out_dir            <- file.path(project_repo_dir, "outDir")
+qc_dir             <- file.path(out_dir, "QC")
+
+# create the output directories if they don't already exist
+for (d in c(processed_data_dir, out_dir, qc_dir)) {
+  dir.create(d, recursive = TRUE, showWarnings = FALSE)
+  cat("Output directory confirmed:", d, "\n")
+}
+```
+
+# Load libraries
+
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+required_pkgs <- c("oligo",
+                   "pd.mogene.1.0.st.v1",
+                   "oligoClasses",  # affyPLM-equivalent probe-level modelling via oligo
+                   "limma",
+                   "RColorBrewer",
+                   "ggplot2",
+                   "ggrepel",
+                   "pheatmap")
+
+for (pkg in required_pkgs) {
+  # install packages if not already installed
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    BiocManager::install(pkg, ask = FALSE, update = FALSE)
+  }
+  # load the required libraries
+  library(pkg, character.only = TRUE)
+}
+```
+
+# Locate and validate CEL files
+
+```{r}
+# list files in the raw data directory
+cel_files <- list.celfiles(raw_data_dir, full.names = TRUE)
+# ensure reproducible ordering
+cel_files <- sort(cel_files)
+# stop if there are no files found
+if (length(cel_files) == 0) {
+  stop("No CEL files found in: ", raw_data_dir)
+}
+
+cat("Found", length(cel_files), "CEL files:\n")
+cat(paste0("  ", basename(cel_files), collapse = "\n"), "\n")
+
+# Validate array type from CEL headers before reading to avoid cryptic errors
+# from stray files of a different platform landing in the raw directory.
+# affxparser::readCelHeader is the correct function — oligo depends on it
+# internally but does not export readCelHeader in recent Bioconductor releases.
+if (!requireNamespace("affxparser", quietly = TRUE))
+  BiocManager::install("affxparser", ask = FALSE, update = FALSE)
+
+cel_headers <- lapply(cel_files, affxparser::readCelHeader)
+array_types  <- sapply(cel_headers, `[[`, "chiptype")
+cat("\nArray types detected:\n")
+print(table(array_types))
+
+if (length(unique(array_types)) > 1) {
+  stop("Mixed array types detected — all CEL files must be from the same platform.\n",
+       "Types found: ", paste(unique(array_types), collapse = ", "))
+}
+```
+
+# Read CEL files
+
+```{r}
+raw_data <- read.celfiles(cel_files)
+
+# Strip path and .CEL extension, then extract "group_replicate" (fields 2 and 3)
+sampleNames(raw_data) <- sapply(
+  tools::file_path_sans_ext(basename(cel_files)),
+  function(x) paste(strsplit(x, "_")[[1]][2:3], collapse = "_")
+)
+
+cat("\nSample names after cleaning:\n")
+print(sampleNames(raw_data))
+```
+
+# Build sample metadata
+
+```{r}
+# pData() from an oligo read.celfiles() object contains only file paths by default — not useful as a metadata file on its own.
+# Here I will build a structured metadata table and add group/condition columns to match the experimental design before proceeding.
+
+sample_metadata <- data.frame(
+  sample_name = sampleNames(raw_data),
+  cel_file    = basename(cel_files),
+  group       = c("con","con","con", "con", "GATA2","GATA2","GATA2", "GATA2"),   # <-- fill this in
+  stringsAsFactors = FALSE
+)
+
+cat("\nSample metadata (fill in 'group' column):\n")
+print(sample_metadata)
+```
+
+# ── PRE-NORMALISATION QC ──────────────────────────────────────────────────────
+
+## Raw intensity boxplots
+
+```{r fig.cap="Boxplots of raw log2 probe intensities. Boxes should be roughly similar in spread and position. Outlier arrays will appear visually shifted or with markedly different spread." fig.keep="all}
+# log2 raw intensities (oligo stores on log2 scale already via exprs on raw)
+raw_exprs <- log2(pm(raw_data))
+
+# Colour by sample for visual separation
+n_samples <- ncol(raw_exprs)
+pal       <- colorRampPalette(RColorBrewer::brewer.pal(8, "Set2"))(n_samples)
+
+png(file.path(out_dir, "QC/raw_probe_intensities_boxplot.png"),
+    width  = 2400,
+    height = 1200,
+    res    = 300)
+par(mar = c(9, 4, 3, 1))
+boxplot(raw_exprs,
+        col     = pal,
+        las     = 2,
+        cex.axis = 0.7,
+        main    = "Raw probe intensities (log2 PM)",
+        ylab    = "log2 intensity",
+        outline = FALSE)
+abline(h = median(raw_exprs, na.rm = TRUE), col = "red", lty = 2, lwd = 1.5)
+dev.off()
+```
+
+## Raw intensity density plots
+
+```{r fig.cap="Density plots of raw log2 intensities per array. All curves should overlap closely. Shifted or multi-modal curves indicate a problem with that sample." fig.keep="all"}
+
+png(file.path(out_dir, "QC/raw_probe_intensities_density.png"),
+    width  = 1800,
+    height = 1200,
+    res    = 300)
+par(mar = c(5, 4, 3, 8), xpd = TRUE)
+plot(density(raw_exprs[, 1]),
+     main = "Raw intensity density (log2 PM)",
+     xlab = "log2 intensity",
+     ylim = c(0, 0.25),
+     col  = pal[1],
+     lwd  = 1.5)
+for (i in seq_len(n_samples)[-1]) {
+  lines(density(raw_exprs[, i]), col = pal[i], lwd = 1.5)
+}
+legend("topright",
+       inset   = c(-0.25, 0),
+       legend  = colnames(raw_exprs),
+       col     = pal,
+       lwd     = 1.5,
+       cex     = 0.65,
+       bty     = "n")
+dev.off()
+```
+
+## Relative Log Expression (RLE) plot — pre-normalisation
+
+```{r fig.cap="RLE plot of raw data. Each box shows the distribution of log2 expression values for one array after subtracting the row-wise median across arrays. Boxes should be centred near zero and compact. Arrays with shifted medians or wide spreads are candidates for investigation or exclusion." fig.keep="all"}
+# Compute RLE: subtract row median across all arrays from each value
+row_medians <- apply(raw_exprs, 1, median, na.rm = TRUE)
+rle_mat     <- sweep(raw_exprs, 1, row_medians, "-")
+
+png(file.path(out_dir, "QC/raw_probe_RLE_boxplot.png"),
+    width  = 2400,
+    height = 1200,
+    res    = 300)
+par(mar = c(9, 4, 3, 1))
+oligo::boxplot(rle_mat,
+        col      = pal,
+        las      = 2,
+        cex.axis = 0.7,
+        main     = "RLE plot — raw data",
+        ylab     = "Relative log2 expression",
+        outline  = FALSE)
+abline(h = 0, col = "red", lty = 2, lwd = 1.5)
+dev.off()
+
+# Summarise RLE medians as a QC table
+rle_summary <- data.frame(
+  sample     = colnames(rle_mat),
+  rle_median = round(apply(rle_mat, 2, median, na.rm = TRUE), 4),
+  rle_iqr    = round(apply(rle_mat, 2, IQR,    na.rm = TRUE), 4)
+)
+cat("\nRLE summary (medians should be ≈ 0; IQR should be small and consistent):\n")
+print(rle_summary)
+
+# Flag potential outliers: RLE median > 0.1 or IQR > 1.5× the group median IQR
+median_iqr  <- median(rle_summary$rle_iqr)
+flagged     <- rle_summary[abs(rle_summary$rle_median) > 0.1 |
+                            rle_summary$rle_iqr > 1.5 * median_iqr, ]
+if (nrow(flagged) > 0) {
+  warning("Potential outlier arrays flagged by RLE:\n",
+          paste(flagged$sample, collapse = ", "),
+          "\nReview these samples carefully before proceeding.")
+} else {
+  cat("No outlier arrays flagged by RLE criteria.\n")
+}
+```
+
+## RNA degradation plot
+
+```{r fig.cap="RNA degradation plot. Each line represents one sample. Lines should be broadly parallel and flat. Steep positive slopes (5' to 3') indicate RNA degradation in that sample."}
+# oligo provides a degradation-style plot via image() and boxplot on raw
+# For MoGene ST arrays the full AffyRNAdeg() isn't available, but we can
+# approximate with the built-in oligo image for spatial artefacts, and use
+# the 3'/5' probe-index intensity trend manually.
+#
+# The oligo::image() call below plots a spatial heatmap for each array.
+# Run it in a loop and check for spatial gradients (blobs, stripes, edges).
+cat("Generating spatial artefact images for each array...\n")
+for (i in seq_len(ncol(raw_data))) {
+  png(file.path(qc_dir, paste0("spatial_image_", sampleNames(raw_data)[i], ".png")),
+      width  = 1200,
+      height = 1200,
+      res    = 300)
+  
+  oligo::image(raw_data[, i],
+               main = paste("Spatial image:", sampleNames(raw_data)[i]))
+  
+  dev.off()
+}
+```
+
+# RMA normalisation
+
+```{r}
+# perform RMA normalisation
+norm_data <- rma(raw_data)
+
+cat("\nRMA normalisation complete.\n")
+cat("Dimensions (probes × samples):", dim(exprs(norm_data)), "\n")
+```
+
+# Extract expression matrix
+
+```{r}
+expr_matrix <- exprs(norm_data)
+
+# FIX: add a dimension check here to catch silent problems early
+if (nrow(expr_matrix) == 0 | ncol(expr_matrix) == 0) {
+  stop("Expression matrix is empty after RMA — investigate read.celfiles() output.")
+}
+cat("Expression matrix dimensions:", nrow(expr_matrix), "probes ×",
+    ncol(expr_matrix), "samples\n")
+cat("Expression value range: [",
+    round(min(expr_matrix), 2), ",",
+    round(max(expr_matrix), 2), "]\n")
+```
+
+# ── POST-NORMALISATION QC ─────────────────────────────────────────────────────
+
+## Normalised intensity boxplots
+
+```{r fig.cap="Boxplots of RMA-normalised log2 expression values. After normalisation all boxes should be tightly aligned at the same median with similar spread. Persistent outliers after RMA warrant investigation." fig.keep="all"}
+
+
+png(file.path(out_dir, "QC/normalised_probe_RLE_boxplot.png"),
+    width  = 2400,
+    height = 1200,
+    res    = 300)
+par(mar = c(9, 4, 3, 1))
+oligo::boxplot(expr_matrix,
+               col      = pal,
+               las      = 2,
+               cex.axis = 0.7,
+               main     = "RMA-normalised expression (log2)",
+               ylab     = "log2 expression",
+               outline  = FALSE)
+abline(h = median(expr_matrix, na.rm = TRUE), col = "red", lty = 2, lwd = 1.5)
+dev.off()
+```
+
+## Normalised density plots
+
+```{r fig.cap="Density plots of RMA-normalised expression. All distributions should now overlap almost perfectly. Persistent separation after RMA is unusual and should be investigated."}
+
+png(file.path(out_dir, "QC/normalised_probe_RLE_density.png"),
+    width  = 1800,
+    height = 1200,
+    res    = 300)
+par(mar = c(5, 4, 3, 8), xpd = TRUE)
+plot(density(expr_matrix[, 1]),
+     main = "Normalised expression density (log2)",
+     xlab = "log2 expression",
+     col  = pal[1],
+     lwd  = 1.5)
+for (i in seq_len(n_samples)[-1]) {
+  lines(density(expr_matrix[, i]), col = pal[i], lwd = 1.5)
+}
+legend("topright",
+       inset  = c(-0.25, 0),
+       legend = colnames(expr_matrix),
+       col    = pal,
+       lwd    = 1.5,
+       cex    = 0.65,
+       bty    = "n")
+dev.off()
+```
+
+## PCA — post-normalisation
+
+```{r fig.cap="PCA of RMA-normalised expression. Samples should cluster by biological group. Clustering by batch, processing date, or technician indicates a confound that may need to be addressed (e.g. ComBat correction). Label each point with its sample name to identify any outlier positions."}
+pca_res <- prcomp(t(expr_matrix), scale. = FALSE)
+pca_df  <- as.data.frame(pca_res$x[, 1:2])
+pca_df$sample <- rownames(pca_df)
+pca_df$group  <- sample_metadata$group[match(pca_df$sample,
+                                             sample_metadata$sample_name)]
+
+# Variance explained
+pct_var <- round(100 * pca_res$sdev^2 / sum(pca_res$sdev^2), 1)
+
+pca_plot <- ggplot(pca_df,
+                   aes(x = PC1,
+                       y = PC2,
+                       colour = group,
+                       label = sample)) +
+  geom_point(size = 4, alpha = 0.9) +
+  ggrepel::geom_text_repel(size = 3.2,
+                           show.legend = FALSE,
+                           max.overlaps = Inf) +  # requires ggrepel
+  scale_colour_manual(values = c("con" = "#003087", "GATA2" = "#CC0000")) +
+  labs(
+    title  = "PCA — RMA-normalised expression",
+    x      = paste0("PC1 (", pct_var[1], "% variance)"),
+    y      = paste0("PC2 (", pct_var[2], "% variance)"),
+    colour = "Group"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(legend.position = "right")
+ggsave(plot = pca_plot,
+       filename = file.path(out_dir, "pca_norm_1_2.png"),
+                            width = 8,
+                            height = 6,
+                            units = "in")
+```
+
+## Sample-to-sample correlation heatmap
+
+```{r fig.cap="Pairwise Pearson correlation heatmap of RMA-normalised expression. All values should be high (> 0.95 for good microarray data). Samples with systematically lower correlations to all others are candidates for exclusion."}
+cor_mat <- cor(expr_matrix, method = "pearson")
+
+# Annotate rows/cols with group if available
+ann_df <- data.frame(Group = sample_metadata$group,
+                     row.names = sample_metadata$sample_name)
+
+pheatmap(cor_mat,
+         annotation_col  = ann_df,
+         annotation_row  = ann_df,
+         color           = colorRampPalette(c("#2166AC", "white", "#B2182B"))(100),
+         breaks          = seq(0.85, 1, length.out = 101),
+         display_numbers = TRUE,
+         number_format   = "%.3f",
+         fontsize_number = 7,
+         main            = "Sample-to-sample Pearson correlation",
+         border_color    = NA,
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean")
+
+# Flag any pairwise correlation below threshold
+cor_threshold <- 0.95
+low_cor       <- which(cor_mat < cor_threshold & upper.tri(cor_mat), arr.ind = TRUE)
+if (nrow(low_cor) > 0) {
+  cat("\nSample pairs with Pearson r <", cor_threshold, ":\n")
+  for (k in seq_len(nrow(low_cor))) {
+    cat(sprintf("  %s vs %s: r = %.4f\n",
+                rownames(cor_mat)[low_cor[k, 1]],
+                colnames(cor_mat)[low_cor[k, 2]],
+                cor_mat[low_cor[k, 1], low_cor[k, 2]]))
+  }
+} else {
+  cat("All pairwise Pearson correlations are >=", cor_threshold, "\n")
+}
+```
+
+## RLE plot — post-normalisation
+
+```{r fig.cap="RLE plot post-RMA. After normalisation boxes should be tightly centred on zero with minimal spread. Any remaining wide spread or shifted median warrants investigation."}
+row_medians_norm <- apply(expr_matrix, 1, median, na.rm = TRUE)
+rle_mat_norm     <- sweep(expr_matrix, 1, row_medians_norm, "-")
+
+png(file.path(out_dir, "QC/normalised_probe_RLE_boxplot.png"),
+    width  = 2400,
+    height = 1200,
+    res    = 300)
+par(mar = c(9, 4, 3, 1))
+oligo::boxplot(rle_mat_norm,
+        col      = pal,
+        las      = 2,
+        cex.axis = 0.7,
+        main     = "RLE plot — post-RMA normalisation",
+        ylab     = "Relative log2 expression",
+        outline  = FALSE)
+abline(h = 0, col = "red", lty = 2, lwd = 1.5)
+dev.off()
+```
+
+# Save outputs
+
+```{r}
+write.csv(expr_matrix,
+          file  = file.path(processed_data_dir, "expression_matrix_rma.csv"),
+          quote = FALSE)
+
+saveRDS(expr_matrix,
+        file = file.path(processed_data_dir, "expression_matrix_rma.rds"))
+
+saveRDS(norm_data,
+        file = file.path(processed_data_dir, "norm_data_rma.rds"))
+
+cat("Expression matrix saved:", nrow(expr_matrix), "probes ×",
+    ncol(expr_matrix), "samples\n")
+```
+
+# Save sample metadata
+
+```{r}
+# FIX: was referencing 'processed_data' (undefined); corrected to processed_data_dir
+# FIX: now saves the structured metadata table rather than the sparse pData() output
+write.csv(sample_metadata,
+          file  = file.path(processed_data_dir, "sample_metadata.csv"),
+          quote = FALSE,
+          row.names = FALSE)
+
+cat("Sample metadata saved.\n")
+```
+
+# Session info for reproducibility
+
+```{r}
+writeLines(capture.output(sessionInfo()),
+           file.path(out_dir, "sessionInfo_preprocessing.txt"))
+cat("Processing complete.\n")
+```
