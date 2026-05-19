@@ -133,12 +133,15 @@ print(sampleNames(raw_data))
 sample_metadata <- data.frame(
   sample_name = sampleNames(raw_data),
   cel_file    = basename(cel_files),
-  group       = c("con","con","con", "con", "GATA2","GATA2","GATA2", "GATA2"),   # <-- fill this in
-  stringsAsFactors = FALSE
+  group       = c("con","con","con","con","GATA2","GATA2","GATA2","GATA2"),
+  stringsAsFactors = FALSE,
+  row.names   = sampleNames(raw_data)   # <-- this is what was missing
 )
 
-cat("\nSample metadata (fill in 'group' column):\n")
-print(sample_metadata)
+pData(raw_data) <- sample_metadata
+
+cat("\nSample metadata:\n")
+print(pData(raw_data))
 ```
 
 # ── PRE-NORMALISATION QC ──────────────────────────────────────────────────────
@@ -297,7 +300,6 @@ cat("Expression value range: [",
 
 ```{r fig.cap="Boxplots of RMA-normalised log2 expression values. After normalisation all boxes should be tightly aligned at the same median with similar spread. Persistent outliers after RMA warrant investigation." fig.keep="all"}
 
-
 png(file.path(out_dir, "QC/normalised_probe_RLE_boxplot.png"),
     width  = 2400,
     height = 1200,
@@ -438,6 +440,63 @@ abline(h = 0, col = "red", lty = 2, lwd = 1.5)
 dev.off()
 ```
 
+# Intensity level filtering 
+
+```{r}
+# ── Step 1: Compute per-probe medians and plot histogram ──────────────────────
+probe_medians <- rowMedians(Biobase::exprs(norm_data))
+
+hist(probe_medians,
+     100,
+     col    = "cornsilk1",
+     freq   = FALSE,
+     main   = "Histogram of median probe intensities (RMA normalised)",
+     border = "antiquewhite4",
+     xlab   = "Median log2 intensity")
+
+# ── Step 2: Set threshold visually ───────────────────────────────────────────
+# Inspect the histogram output above, then set man_threshold to the left
+# of the main peak. Adjust this value after inspecting your histogram.
+man_threshold <- 5.0   # <-- update after inspecting histogram
+
+# Overlay threshold line on histogram
+hist(probe_medians,
+     100,
+     col    = "cornsilk1",
+     freq   = FALSE,
+     main   = "Histogram of median probe intensities (RMA normalised)",
+     border = "antiquewhite4",
+     xlab   = "Median log2 intensity")
+abline(v = man_threshold, col = "coral4", lwd = 2)
+
+# ── Step 3: Determine samples cutoff from smallest group ─────────────────────
+# For your dataset: n=4 con, n=4 GATA2 — smallest group is 4
+no_of_samples  <- table(pData(norm_data)$group)
+samples_cutoff <- min(no_of_samples)
+
+cat("Group sizes:\n")
+print(no_of_samples)
+cat("Samples cutoff (smallest group size):", samples_cutoff, "\n")
+
+# ── Step 4: Apply per-sample filter ──────────────────────────────────────────
+# Keep probe if intensity > threshold in at least `samples_cutoff` samples
+idx_man_threshold <- apply(
+  Biobase::exprs(norm_data), 1,
+  function(x) sum(x > man_threshold) >= samples_cutoff
+)
+
+cat("\nProbe filter summary:\n")
+print(table(idx_man_threshold))
+
+# ── Step 5: Subset the normalised ExpressionSet ───────────────────────────────
+norm_filtered <- subset(norm_data, idx_man_threshold)
+
+cat("\nProbes before filtering:", nrow(norm_data),    "\n")
+cat("Probes after filtering: ", nrow(norm_filtered), "\n")
+cat("Probes removed:         ", nrow(norm_data) - nrow(norm_filtered), "\n")
+
+```
+
 # Save outputs
 
 ```{r}
@@ -450,6 +509,9 @@ saveRDS(expr_matrix,
 
 saveRDS(norm_data,
         file = file.path(processed_data_dir, "norm_data_rma.rds"))
+
+# Save filtered ExpressionSet for downstream use
+saveRDS(norm_filtered, file.path(processed_data_dir, "norm_data_filtered.rds"))
 
 cat("Expression matrix saved:", nrow(expr_matrix), "probes ×",
     ncol(expr_matrix), "samples\n")
