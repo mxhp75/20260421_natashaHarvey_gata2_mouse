@@ -112,7 +112,7 @@ if (length(unique(array_types)) > 1) {
 # Read CEL files
 
 ```{r}
-raw_data <- read.celfiles(cel_files)
+raw_data <- oligo::read.celfiles(cel_files)
 
 # Strip path and .CEL extension, then extract "group_replicate" (fields 2 and 3)
 sampleNames(raw_data) <- sapply(
