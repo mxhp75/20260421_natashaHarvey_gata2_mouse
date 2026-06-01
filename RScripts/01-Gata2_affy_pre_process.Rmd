@@ -224,7 +224,7 @@ for (i in seq_len(ncol(raw_data))) {
 }
 ```
 
-## PCA — post-normalisation
+## PCA — raw log2 expression
 
 ```{r fig.cap="PCA of raw log2 expression. Samples will cluster by whatever factor contains the most variance."}
 # note raw_exprs is log2 data
@@ -316,7 +316,7 @@ if (nrow(flagged) > 0) {
 }
 ```
 
-# RMA normalisation with prior normalisation
+# Full RMA normalisation (with prior normalisation)
 
 ```{r}
 # perform RMA with prior normalisation
@@ -573,7 +573,7 @@ abline(v = man_threshold, col = "coral4", lwd = 2)
 
 # ── Step 3: Determine samples cutoff from smallest group ─────────────────────
 # For your dataset: n=4 con, n=4 GATA2 — smallest group is 4
-no_of_samples  <- table(pData(norm_data)$group)
+no_of_samples  <- table(pData(rma_norm_data)$group)
 samples_cutoff <- min(no_of_samples)
 
 cat("Group sizes:\n")
@@ -583,7 +583,7 @@ cat("Samples cutoff (smallest group size):", samples_cutoff, "\n")
 # ── Step 4: Apply per-sample filter ──────────────────────────────────────────
 # Keep probe if intensity > threshold in at least `samples_cutoff` samples
 idx_man_threshold <- apply(
-  Biobase::exprs(norm_data), 1,
+  Biobase::exprs(rma_norm_data), 1,
   function(x) sum(x > man_threshold) >= samples_cutoff
 )
 
@@ -591,11 +591,11 @@ cat("\nProbe filter summary:\n")
 print(table(idx_man_threshold))
 
 # ── Step 5: Subset the normalised ExpressionSet ───────────────────────────────
-norm_filtered <- subset(norm_data, idx_man_threshold)
+norm_filtered <- subset(rma_norm_data, idx_man_threshold)
 
-cat("\nProbes before filtering:", nrow(norm_data),    "\n")
+cat("\nProbes before filtering:", nrow(rma_norm_data),    "\n")
 cat("Probes after filtering: ", nrow(norm_filtered), "\n")
-cat("Probes removed:         ", nrow(norm_data) - nrow(norm_filtered), "\n")
+cat("Probes removed:         ", nrow(rma_norm_data) - nrow(norm_filtered), "\n")
 
 ```
 
@@ -609,14 +609,13 @@ write.csv(expr_matrix,
 saveRDS(expr_matrix,
         file = file.path(processed_data_dir, "expression_matrix_rma.rds"))
 
-saveRDS(norm_data,
+saveRDS(rma_norm_data,
         file = file.path(processed_data_dir, "norm_data_rma.rds"))
 
 # Save filtered ExpressionSet for downstream use
-saveRDS(norm_filtered, file.path(processed_data_dir, "norm_data_filtered.rds"))
+saveRDS(norm_filtered,
+        file.path(processed_data_dir, "norm_data_filtered.rds"))
 
-cat("Expression matrix saved:", nrow(expr_matrix), "probes ×",
-    ncol(expr_matrix), "samples\n")
 ```
 
 # Save sample metadata
