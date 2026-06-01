@@ -182,9 +182,6 @@ ids_to_exclude <- featureNames(norm_filtered) %in% anno_multi$PROBEID |
 
 cat("Probe exclusion summary:\n")
 print(table(ids_to_exclude))
-# ids_to_exclude
-# FALSE  TRUE 
-# 19377  9991 
 
 eset_final <- subset(norm_filtered, !ids_to_exclude)
 validObject(eset_final)
@@ -204,6 +201,12 @@ cat("  Samples:", ncol(eset_final), "\n")
 #
 # Step 1: seed featureData with PROBEID (rownames of fData by default)
 fData(eset_final)$PROBEID <- rownames(fData(eset_final))
+
+
+stopifnot(
+  "Probe count mismatch between eset_final and anno — investigate before joining" =
+    nrow(eset_final) == nrow(anno)
+)
 
 # Step 2: left-join annotation columns into featureData.
 # left_join preserves all rows of fData(eset_final) and adds SYMBOL,
