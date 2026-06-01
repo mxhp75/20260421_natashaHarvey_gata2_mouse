@@ -1,0 +1,282 @@
+---
+title: "probe_to_gene_mapping"
+author: "Melanie Smith"
+date: "2026-05-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Clean-up environment
+
+```{r}
+rm(list = ls(all.names = TRUE)) # will clear all objects including hidden objects
+gc()                            # free up memory and report the memory usage
+options(
+  max.print        = .Machine$integer.max,
+  scipen           = 999,
+  stringsAsFactors = FALSE,
+  dplyr.summarise.inform = FALSE
+)
+set.seed(42) # set seed for reproducibility
+```
+
+# Set project directories and file paths
+
+```{r}
+project_name  <- "20260421_natashaHarvey_gata2_mouse"
+base_repo_dir <- "/home/melanie-smith/workDir/natashaHarvey"
+
+project_repo_dir <- file.path(base_repo_dir, project_name)
+
+processed_data_dir <- file.path(project_repo_dir, "data", "processed")
+out_dir            <- file.path(project_repo_dir, "outDir")
+
+# Verify required directories exist before any downstream writes fail silently
+for (d in c(processed_data_dir, out_dir)) {
+  if (!dir.exists(d)) {
+    stop("Required directory does not exist: ", d,
+         "\nCreate it or update the path before re-running.")
+  }
+}
+```
+
+# Load libraries
+
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+# mogene10sttranscriptcluster.db may need to be installed manually if not present:
+# BiocManager::install("mogene10sttranscriptcluster.db")
+if (!requireNamespace("mogene10sttranscriptcluster.db", quietly = TRUE)) {
+  BiocManager::install("mogene10sttranscriptcluster.db", ask = FALSE, update = FALSE)
+}
+
+required_pkgs <- c("Biobase", "AnnotationDbi", "mogene10sttranscriptcluster.db", "dplyr")
+
+for (pkg in required_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    BiocManager::install(pkg, ask = FALSE, update = FALSE)
+  }
+  library(pkg, character.only = TRUE)
+}
+```
+
+# Load filtered ExpressionSet
+
+```{r}
+# Load the intensity-filtered, RMA-normalised ExpressionSet produced by the
+# filtering step (norm_data_filtered.rds). Using the ExpressionSet object
+# directly — rather than extracting a plain matrix — keeps expression data,
+# sample metadata (pData), and probe annotations (fData) together in one
+# validated object throughout this script.
+norm_filtered <- readRDS(file.path(processed_data_dir, "norm_data_filtered.rds"))
+
+# Validate the object is internally consistent before proceeding
+validObject(norm_filtered)
+
+cat("Loaded filtered ExpressionSet:\n")
+cat("  Probes :", nrow(norm_filtered), "\n")
+cat("  Samples:", ncol(norm_filtered), "\n")
+cat("\nSample names:\n")
+print(sampleNames(norm_filtered))
+cat("\npData:\n")
+print(pData(norm_filtered))
+```
+
+# Fetch probe annotations
+
+```{r}
+# Query the MoGene-1.0-ST annotation package for gene-level identifiers.
+# featureNames() retrieves probe IDs directly from the ExpressionSet.
+# ENSEMBL is included alongside SYMBOL and GENENAME for use in downstream
+# pathway analyses (e.g. fgsea, g:Profiler) that require Ensembl IDs.
+#
+# Note: AnnotationDbi::select() will warn about 1-to-many mappings —
+# this is expected and is handled explicitly in the steps below.
+anno <- AnnotationDbi::select(
+  mogene10sttranscriptcluster.db,
+  keys    = featureNames(norm_filtered),
+  columns = c("SYMBOL", "GENENAME", "ENSEMBL"),
+  keytype = "PROBEID"
+)
+
+# --- Annotation mapping summary ---
+n_probes_input   <- length(featureNames(norm_filtered))
+n_probes_symbol  <- length(unique(anno$PROBEID[!is.na(anno$SYMBOL)]))
+n_probes_ensembl <- length(unique(anno$PROBEID[!is.na(anno$ENSEMBL)]))
+
+cat("Probes submitted for annotation:  ", n_probes_input,   "\n")
+cat("Probes mapped to a gene symbol:   ", n_probes_symbol,  "\n")
+cat("Probes mapped to an Ensembl ID:   ", n_probes_ensembl, "\n")
+cat("% probes WITHOUT a symbol:        ",
+    round(100 * (1 - n_probes_symbol  / n_probes_input), 1), "%\n")
+cat("% probes WITHOUT an Ensembl ID:   ",
+    round(100 * (1 - n_probes_ensembl / n_probes_input), 1), "%\n")
+```
+
+# Remove unannotated probes (no gene symbol)
+
+```{r}
+# Probes with no SYMBOL cannot be interpreted biologically and are excluded.
+# This mirrors the published approach: subset(anno, !is.na(SYMBOL))
+anno <- subset(anno, !is.na(SYMBOL))
+
+# Report unique probes, not rows
+cat("Rows after removing no-SYMBOL probes:          ", nrow(anno), "\n")
+cat("Unique probes after removing no-SYMBOL probes: ", 
+    length(unique(anno$PROBEID)), "\n")
+```
+
+# Identify and remove ambiguously mapped probes
+
+```{r}
+# Some probe IDs map to more than one gene symbol (ambiguous assignments).
+# Rather than arbitrarily selecting one mapping, we exclude these probes
+# entirely — consistent with the peer-reviewed workflow this pipeline follows.
+#
+# Step 1: count distinct gene symbols per probe
+anno_grouped   <- dplyr::group_by(anno, PROBEID)
+anno_summarised <- dplyr::summarise(anno_grouped,
+                                    no_of_matches = n_distinct(SYMBOL))
+
+# Step 2: identify probes with more than one symbol
+anno_multi <- dplyr::filter(anno_summarised, no_of_matches > 1)
+
+cat("Probes mapping to multiple gene symbols (to exclude):", nrow(anno_multi), "\n")
+
+# Step 3: remove ambiguous probes from annotation table
+anno <- dplyr::filter(anno, !PROBEID %in% anno_multi$PROBEID)
+
+cat("Probes remaining after removing ambiguous mappings:  ", 
+    length(unique(anno$PROBEID)), "\n")
+```
+
+# Resolve remaining 1-to-many probe → Ensembl mappings
+
+```{r}
+# After removing multi-symbol probes, some probes may still have multiple rows
+# due to multiple Ensembl IDs for the same gene (isoform-level records).
+# SYMBOL and GENENAME are identical across these rows — only ENSEMBL differs.
+#
+# Strategy: prefer rows that have an Ensembl ID (sort Ensembl-NA rows to
+# the bottom), then keep the first row per PROBEID. This retains an Ensembl ID
+# wherever one exists without discarding the probe entirely.
+anno <- anno[order(anno$PROBEID, is.na(anno$ENSEMBL)), ]
+anno <- anno[!duplicated(anno$PROBEID), ]
+
+cat("Unique probes after Ensembl deduplication:", nrow(anno), "\n")
+cat("\nPreview of annotation table:\n")
+print(head(anno, 10))
+```
+
+# Exclude ambiguous probes from the ExpressionSet
+
+```{r}
+# Probes to exclude: those with no SYMBOL OR those with ambiguous mappings
+ids_to_exclude <- featureNames(norm_filtered) %in% anno_multi$PROBEID |
+                  !featureNames(norm_filtered) %in% anno$PROBEID
+
+cat("Probe exclusion summary:\n")
+print(table(ids_to_exclude))
+# ids_to_exclude
+# FALSE  TRUE 
+# 19377  9991 
+
+eset_final <- subset(norm_filtered, !ids_to_exclude)
+validObject(eset_final)
+
+cat("\nExpressionSet after probe exclusion:\n")
+cat("  Probes :", nrow(eset_final), "\n")   # expect 19,377
+cat("  Samples:", ncol(eset_final), "\n")
+```
+
+# Add annotations to featureData of the ExpressionSet
+
+```{r}
+# Store probe annotations directly in the featureData slot of the ExpressionSet.
+# This keeps SYMBOL, GENENAME, and ENSEMBL travelling with the expression data
+# as a single validated object — no separate annotation data frames needed
+# downstream.
+#
+# Step 1: seed featureData with PROBEID (rownames of fData by default)
+fData(eset_final)$PROBEID <- rownames(fData(eset_final))
+
+# Step 2: left-join annotation columns into featureData.
+# left_join preserves all rows of fData(eset_final) and adds SYMBOL,
+# GENENAME, ENSEMBL from anno for matching PROBEIDs only.
+fData(eset_final) <- dplyr::left_join(fData(eset_final), anno, by = "PROBEID")
+
+# Step 3: restore rownames (left_join drops them)
+rownames(fData(eset_final)) <- fData(eset_final)$PROBEID
+
+# Validate the final annotated object
+validObject(eset_final)
+
+cat("featureData annotation added successfully.\n")
+cat("\nPreview of fData:\n")
+print(head(fData(eset_final), 10))
+
+# Confirm no missing symbols remain in fData
+n_na <- sum(is.na(fData(eset_final)$SYMBOL))
+if (n_na > 0) {
+  warning(n_na, " probes with NA SYMBOL remain in fData — investigate.")
+} else {
+  cat("\nAll probes in fData have a gene symbol — annotation looks clean.\n")
+}
+```
+
+# Final ExpressionSet summary
+
+```{r}
+cat("=== Final annotated ExpressionSet summary ===\n")
+cat("Probes (features): ", nrow(eset_final), "\n")
+cat("Samples:           ", ncol(eset_final), "\n")
+cat("\nfeatureData columns:", paste(colnames(fData(eset_final)), collapse = ", "), "\n")
+cat("phenoData columns:  ", paste(colnames(pData(eset_final)), collapse = ", "), "\n")
+
+cat("\nSample group assignments:\n")
+print(pData(eset_final)[, c("sample_name", "group")])
+
+cat("\nfData preview (first 10 probes):\n")
+print(head(fData(eset_final)[, c("PROBEID", "SYMBOL", "GENENAME", "ENSEMBL")], 10))
+```
+
+# Save annotated ExpressionSet
+
+```{r}
+# Save the fully annotated ExpressionSet as the primary output of this script.
+# Downstream scripts (DE analysis, visualisation) load this single object
+# and have immediate access to both expression values and annotations.
+saveRDS(
+  eset_final,
+  file = file.path(processed_data_dir, "eset_annotated_filtered.rds")
+)
+
+# Also save a human-readable CSV of fData for reference
+write.csv(
+  fData(eset_final)[, c("PROBEID", "SYMBOL", "GENENAME", "ENSEMBL")],
+  file      = file.path(out_dir, "probe_annotation_table.csv"),
+  row.names = FALSE,
+  quote     = FALSE
+)
+
+cat("Annotated ExpressionSet saved to: ",
+    file.path(processed_data_dir, "eset_annotated_filtered.rds"), "\n")
+cat("Annotation table saved to:        ",
+    file.path(out_dir, "probe_annotation_table.csv"), "\n")
+```
+
+# Session info for reproducibility
+
+```{r}
+writeLines(
+  capture.output(sessionInfo()),
+  file.path(out_dir, "sessionInfo_annotation.txt")
+)
+
+cat("Annotation script complete.\n")
+```
