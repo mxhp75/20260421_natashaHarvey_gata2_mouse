@@ -200,12 +200,84 @@ legend("topright",
 dev.off()
 ```
 
+## RNA degradation plot
+
+```{r fig.cap="RNA degradation plot. Each line represents one sample. Lines should be broadly parallel and flat. Steep positive slopes (5' to 3') indicate RNA degradation in that sample."}
+# oligo provides a degradation-style plot via image() and boxplot on raw
+# For MoGene ST arrays the full AffyRNAdeg() isn't available, but we can
+# approximate with the built-in oligo image for spatial artefacts, and use
+# the 3'/5' probe-index intensity trend manually.
+#
+# The oligo::image() call below plots a spatial heatmap for each array.
+# Run it in a loop and check for spatial gradients (blobs, stripes, edges).
+cat("Generating spatial artefact images for each array...\n")
+for (i in seq_len(ncol(raw_data))) {
+  png(file.path(qc_dir, paste0("spatial_image_", sampleNames(raw_data)[i], ".png")),
+      width  = 1200,
+      height = 1200,
+      res    = 300)
+  
+  oligo::image(raw_data[, i],
+               main = paste("Spatial image:", sampleNames(raw_data)[i]))
+  
+  dev.off()
+}
+```
+
+## PCA — post-normalisation
+
+```{r fig.cap="PCA of raw log2 expression. Samples will cluster by whatever factor contains the most variance."}
+# note raw_exprs is log2 data
+pca_res_raw <- prcomp(t(raw_exprs), scale. = FALSE)
+pca_df_raw  <- as.data.frame(pca_res_raw$x[, 1:2])
+pca_df_raw$sample <- rownames(pca_df_raw)
+pca_df_raw$group  <- sample_metadata$group[match(pca_df_raw$sample,
+                                             sample_metadata$sample_name)]
+
+# Variance explained
+pct_var_raw <- round(100 * pca_res_raw$sdev^2 / sum(pca_res_raw$sdev^2), 1)
+
+pca_plot_raw <- ggplot(pca_df_raw,
+                   aes(x = PC1,
+                       y = PC2,
+                       colour = group,
+                       label = sample)) +
+  geom_point(size = 4, alpha = 0.9) +
+  ggrepel::geom_text_repel(size = 3.2,
+                           show.legend = FALSE,
+                           max.overlaps = Inf) +  # requires ggrepel
+  scale_colour_manual(values = c("con" = "#003087", "GATA2" = "#CC0000")) +
+  labs(
+    title  = "PCA — raw log2 expression",
+    x      = paste0("PC1 (", pct_var_raw[1], "% variance)"),
+    y      = paste0("PC2 (", pct_var_raw[2], "% variance)"),
+    colour = "Group"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(legend.position = "right")
+ggsave(plot = pca_plot_raw,
+       filename = file.path(out_dir, "pca_raw_1_2.png"),
+                            width = 8,
+                            height = 6,
+                            units = "in")
+```
+
+# RMA normalisation without prior normalisation
+
+```{r}
+# perform RMA without prior normalisation
+rma_no_norm_data <- oligo::rma(raw_data, target = "core", normalize = FALSE)
+
+cat("\nRMA normalisation complete.\n")
+cat("Dimensions (probes × samples):", dim(exprs(rma_no_norm_data)), "\n")
+```
+
 ## Relative Log Expression (RLE) plot — pre-normalisation
 
 ```{r fig.cap="RLE plot of raw data. Each box shows the distribution of log2 expression values for one array after subtracting the row-wise median across arrays. Boxes should be centred near zero and compact. Arrays with shifted medians or wide spreads are candidates for investigation or exclusion." fig.keep="all"}
 # Compute RLE: subtract row median across all arrays from each value
-row_medians <- apply(raw_exprs, 1, median, na.rm = TRUE)
-rle_mat     <- sweep(raw_exprs, 1, row_medians, "-")
+row_medians <- Biobase::rowMedians(as.matrix(Biobase::exprs(rma_no_norm_data)))
+rle_mat     <- sweep(as.matrix(Biobase::exprs(rma_no_norm_data)), 1, row_medians, "-")
 
 png(file.path(out_dir, "QC/raw_probe_RLE_boxplot.png"),
     width  = 2400,
@@ -216,8 +288,8 @@ oligo::boxplot(rle_mat,
         col      = pal,
         las      = 2,
         cex.axis = 0.7,
-        main     = "RLE plot — raw data",
-        ylab     = "Relative log2 expression",
+        main     = "RLE plot — raw data (RMA no normalisation)",
+        ylab     = "Relative log2 expression", # log2_expression_deviation
         outline  = FALSE)
 abline(h = 0, col = "red", lty = 2, lwd = 1.5)
 dev.off()
@@ -244,44 +316,48 @@ if (nrow(flagged) > 0) {
 }
 ```
 
-## RNA degradation plot
-
-```{r fig.cap="RNA degradation plot. Each line represents one sample. Lines should be broadly parallel and flat. Steep positive slopes (5' to 3') indicate RNA degradation in that sample."}
-# oligo provides a degradation-style plot via image() and boxplot on raw
-# For MoGene ST arrays the full AffyRNAdeg() isn't available, but we can
-# approximate with the built-in oligo image for spatial artefacts, and use
-# the 3'/5' probe-index intensity trend manually.
-#
-# The oligo::image() call below plots a spatial heatmap for each array.
-# Run it in a loop and check for spatial gradients (blobs, stripes, edges).
-cat("Generating spatial artefact images for each array...\n")
-for (i in seq_len(ncol(raw_data))) {
-  png(file.path(qc_dir, paste0("spatial_image_", sampleNames(raw_data)[i], ".png")),
-      width  = 1200,
-      height = 1200,
-      res    = 300)
-  
-  oligo::image(raw_data[, i],
-               main = paste("Spatial image:", sampleNames(raw_data)[i]))
-  
-  dev.off()
-}
-```
-
-# RMA normalisation
+# RMA normalisation with prior normalisation
 
 ```{r}
-# perform RMA normalisation
-norm_data <- rma(raw_data)
+# perform RMA with prior normalisation
+rma_norm_data <- oligo::rma(raw_data, target = "core", normalize = TRUE)
 
 cat("\nRMA normalisation complete.\n")
-cat("Dimensions (probes × samples):", dim(exprs(norm_data)), "\n")
+cat("Dimensions (probes × samples):", dim(exprs(rma_norm_data)), "\n")
+```
+
+# Mean SD plot
+
+```{r}
+
+# Mean-SD plot
+plotMeanSD <- function(mat) {
+  row_means <- rowMeans(mat)
+  row_sds   <- apply(mat, 1, sd)
+  
+  plot(row_means, row_sds,
+       pch  = 16,
+       cex  = 0.3,
+       col  = adjustcolor("steelblue", alpha.f = 0.4),
+       xlab = "Mean log2 expression",
+       ylab = "Standard deviation",
+       main = "Mean-SD plot — RMA normalised")
+  
+  # Add a loess smoothed line to show the trend
+  loess_fit <- loess(row_sds ~ row_means)
+  lines(sort(row_means),
+        predict(loess_fit)[order(row_means)],
+        col = "red", lwd = 2)
+}
+
+plotMeanSD(exprs(rma_norm_data))
+
 ```
 
 # Extract expression matrix
 
 ```{r}
-expr_matrix <- exprs(norm_data)
+expr_matrix <- exprs(rma_norm_data)
 
 # FIX: add a dimension check here to catch silent problems early
 if (nrow(expr_matrix) == 0 | ncol(expr_matrix) == 0) {
@@ -381,11 +457,12 @@ ggsave(plot = pca_plot,
 ```
 
 ## Sample-to-sample correlation heatmap
+## Pearson's correlation
 
 ```{r fig.cap="Pairwise Pearson correlation heatmap of RMA-normalised expression. All values should be high (> 0.95 for good microarray data). Samples with systematically lower correlations to all others are candidates for exclusion."}
 cor_mat <- cor(expr_matrix, method = "pearson")
 
-# Annotate rows/cols with group if available
+# Annotate rows/cols with group
 ann_df <- data.frame(Group = sample_metadata$group,
                      row.names = sample_metadata$sample_name)
 
@@ -418,6 +495,30 @@ if (nrow(low_cor) > 0) {
 }
 ```
 
+## Manhattan Distance
+
+```{r}
+dists <- as.matrix(dist(t(expr_matrix), method = "manhattan"))
+rownames(dists) <- row.names(pData(rma_norm_data))
+hmcol <- rev(colorRampPalette(RColorBrewer::brewer.pal(9, "YlOrRd"))(255))
+
+# Annotate rows/cols with group
+ann_df <- data.frame(Group = sample_metadata$group,
+                     row.names = sample_metadata$sample_name)
+
+pheatmap(dists, col = (hmcol),
+         annotation_col  = ann_df,
+         annotation_row  = ann_df,
+         legend = TRUE,
+         treeheight_row = 0,
+         display_numbers = TRUE,
+         number_format   = "%.3f",
+         legend_breaks = c(min(dists, na.rm = TRUE),
+                           max(dists, na.rm = TRUE)),
+         legend_labels = (c("small distance", "large distance")),
+         main = "Clustering heatmap for the calibrated samples")
+```
+
 ## RLE plot — post-normalisation
 
 ```{r fig.cap="RLE plot post-RMA. After normalisation boxes should be tightly centred on zero with minimal spread. Any remaining wide spread or shifted median warrants investigation."}
@@ -438,13 +539,14 @@ oligo::boxplot(rle_mat_norm,
         outline  = FALSE)
 abline(h = 0, col = "red", lty = 2, lwd = 1.5)
 dev.off()
+
 ```
 
 # Intensity level filtering 
 
 ```{r}
 # ── Step 1: Compute per-probe medians and plot histogram ──────────────────────
-probe_medians <- rowMedians(Biobase::exprs(norm_data))
+probe_medians <- rowMedians(Biobase::exprs(rma_norm_data))
 
 hist(probe_medians,
      100,
