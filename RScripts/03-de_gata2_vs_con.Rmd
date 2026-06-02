@@ -41,7 +41,7 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 if (!requireNamespace("BiocManager", quietly = TRUE))
   install.packages("BiocManager")
 
-required_pkgs <- c("limma")
+required_pkgs <- c("limma", "dplyr", "tidyverse")
 
 for (pkg in required_pkgs) {
   if (!requireNamespace(pkg, quietly = TRUE)) {
@@ -54,43 +54,59 @@ for (pkg in required_pkgs) {
 # Load gene-level expression matrix
 
 ```{r}
-# Load the gene-level matrix produced by script 02 (one row per gene,
-# best probe selected by highest mean expression across all samples)
-expr_annotated <- readRDS(file.path(processed_data, "expression_matrix_rma_gene_level.rds"))
+# Load the annotated, filtered ExpressionSet produced by script 02
+eset <- readRDS(file.path(processed_data, "eset_annotated_filtered.rds"))
 
-cat("Loaded gene-level expression matrix with", nrow(expr_annotated), "genes\n")
+# Validate before proceeding
+validObject(eset)
+
+cat("Loaded annotated ExpressionSet:\n")
+cat("  Probes :", nrow(eset), "\n")
+cat("  Samples:", ncol(eset), "\n")
 ```
 
 # Separate annotation columns from expression values
 
 ```{r}
-# Annotation columns produced by script 02
-annot_cols <- c("PROBEID", "SYMBOL", "GENENAME", "ENSEMBL")
+# Extract expression matrix and annotations from the ExpressionSet slots
+# Numeric expression matrix — probes x samples
+expr_mat <- exprs(eset)
 
-# Grab the sample IDs (i.e. the CEL file sample columns)
-expr_cols <- setdiff(colnames(expr_annotated), annot_cols)
+# Annotation data frame from featureData slot
+annot_df <- fData(eset)[, c("PROBEID", "SYMBOL", "GENENAME", "ENSEMBL"), drop = FALSE]
 
-# Split into annotation and numeric expression data frames
-annot_df <- expr_annotated[, annot_cols, drop = FALSE]
-expr_mat  <- as.matrix(expr_annotated[, expr_cols])
-rownames(expr_mat) <- expr_annotated$PROBEID
+# Sample column names for reference
+expr_cols <- colnames(expr_mat)
 
-cat("Annotation columns:", paste(annot_cols, collapse = ", "), "\n")
-cat("Expression columns (", length(expr_cols), " samples):\n", sep = "")
+cat("Probes:  ", nrow(expr_mat), "\n")
+cat("Samples: ", length(expr_cols), "\n")
+cat("Annotation columns:", paste(colnames(annot_df), collapse = ", "), "\n")
+cat("Sample columns:\n")
 print(expr_cols)
+
+# Sanity check — rownames of expr_mat should match PROBEID in annot_df
+stopifnot(
+  "Probe ID mismatch between exprs() and fData() — check ExpressionSet integrity" =
+    all(rownames(expr_mat) == annot_df$PROBEID)
+)
 ```
 
 # Define sample groups from CEL filenames
 
 ```{r}
-# Group labels are encoded in filenames as the second '_'-delimited field:
-#   JK_con_A_(MoGene-1_0-st-v1).CEL   -> "con"
-#   JK_GATA2_A_(MoGene-1_0-st-v1).CEL -> "GATA2"
-group_labels <- sub("^JK_([^_]+)_.*$", "\\1", expr_cols)
+# Sample names are already cleaned to "group_replicate" format (e.g. "con_A", "GATA2_A")
+# Strip the trailing _A/_B/_C/_D to recover the group label
+group_labels <- sub("_[A-Za-z]$", "", expr_cols)
 
 # Coerce to factor with control as the reference level
 group <- factor(group_labels, levels = c("con", "GATA2"))
-# sanity check
+
+# Fail early if any unexpected group labels are produced
+if (any(is.na(group))) {
+  stop("Unexpected group labels detected — check sample name format in expr_cols.")
+}
+
+# Sanity check
 cat("Sample group assignments:\n")
 print(data.frame(sample = expr_cols, group = group))
 ```
@@ -118,7 +134,9 @@ contrast_matrix <- makeContrasts(
 )
 
 fit2 <- contrasts.fit(fit, contrast_matrix)
-fit2 <- eBayes(fit2) # empirical Bayes moderation (produces moderated F-statistics)
+fit2 <- eBayes(fit2, 
+               robust = TRUE, # For added protection against outlier probes influencing the empirical Bayes variance estimation
+               trend = TRUE) # empirical Bayes moderation (produces moderated t- and F-statistics)
 ```
 
 # Extract full results table
@@ -145,8 +163,14 @@ results$PROBEID <- rownames(results)
 results_annotated <- merge(
   annot_df,
   results,
-  by = "PROBEID",
-  all.y = TRUE
+  by    = "PROBEID",
+  all.x = TRUE   # left join on annotations — drops any result rows with no annotation
+)
+
+# make sure no rows were dropped in the merge
+stopifnot(
+  "Row count changed after merge — check for PROBEID mismatches" =
+    nrow(results_annotated) == nrow(annot_df)
 )
 
 # Compute fold-change direction label to match old "Fold-Change (Description)" column
@@ -159,40 +183,12 @@ cat("Annotated results table dimensions:", nrow(results_annotated), "rows x",
     ncol(results_annotated), "columns\n")
 ```
 
-# Rename columns to match legacy TAC-style output
-
-```{r}
-# Annotation columns produced by script 02
-results_final <- results_annotated |>
-  dplyr::select(
-    `Transcript Cluster ID` = PROBEID,
-    `Gene Assignment`        = GENENAME,
-    `Gene Symbol`            = SYMBOL,
-    `mRNA Assignment`        = ENSEMBL,
-    `p-value(GATA2 vs. con)` = P.Value,
-    `stepup(p-value(GATA2 vs. con))` = adj.P.Val,
-    `logFC(GATA2 vs. con)`   = logFC,
-    `log-odds(B)`            = B,
-    `Fold-Change (Description)` = FC_description,
-    `AveExpr`                = AveExpr
-  )
-
-cat("Final column names:\n")
-print(colnames(results_final))
-```
-
 # Save full unfiltered results
 
 ```{r}
-# write.csv(
-#   results_final,
-#   file = file.path(out_dir, "lmFit_GATA2_vs_con_full.csv"),
-#   row.names = FALSE,
-#   quote = FALSE
-# )
 
 write.table(
-  results_final,
+  results_annotated,
   file = file.path(out_dir, "lmFit_GATA2_vs_con_full.txt"),
   sep = "\t",
   row.names = FALSE,
@@ -200,7 +196,7 @@ write.table(
 )
 
 saveRDS(
-  results_final,
+  results_annotated,
   file = file.path(out_dir, "lmFit_GATA2_vs_con_full.rds")
 )
 
@@ -211,17 +207,204 @@ cat("Results saved to:", file.path(out_dir, "lmFit_GATA2_vs_con_full.csv"), "\n"
 
 ```{r}
 cat("--- Results summary ---\n")
-cat("Total probes tested:", nrow(results_final), "\n")
+cat("Total probes tested:", nrow(results_annotated), "\n")
 cat("Probes with FDR < 0.05:",
-    sum(results_final$`stepup(p-value(GATA2 vs. con))` < 0.05, na.rm = TRUE), "\n")
+    sum(results_annotated$adj.P.Val < 0.05, na.rm = TRUE), "\n")
 cat("Probes with FDR < 0.01:",
-    sum(results_final$`stepup(p-value(GATA2 vs. con))` < 0.01, na.rm = TRUE), "\n")
+    sum(results_annotated$adj.P.Val < 0.01, na.rm = TRUE), "\n")
 cat("Upregulated in GATA2 (logFC > 0, FDR < 0.05):",
-    sum(results_final$`logFC(GATA2 vs. con)` > 0 &
-          results_final$`stepup(p-value(GATA2 vs. con))` < 0.05, na.rm = TRUE), "\n")
+    sum(results_annotated$logFC > 0 &
+          results_annotated$adj.P.Val < 0.05, na.rm = TRUE), "\n")
 cat("Downregulated in GATA2 (logFC < 0, FDR < 0.05):",
-    sum(results_final$`logFC(GATA2 vs. con)` < 0 &
-          results_final$`stepup(p-value(GATA2 vs. con))` < 0.05, na.rm = TRUE), "\n")
+    sum(results_annotated$logFC < 0 &
+          results_annotated$adj.P.Val < 0.05, na.rm = TRUE), "\n")
+```
+
+# Prepare plot data — classify probes for highlighting
+
+```{r}
+# Significance thresholds
+fdr_thresh <- 0.05
+lfc_thresh <- 1
+
+# Classify each probe into one of three groups for colour coding
+results_annotated$sig_group <- dplyr::case_when(
+  results_annotated$adj.P.Val < fdr_thresh & results_annotated$logFC >  lfc_thresh ~ "Up",
+  results_annotated$adj.P.Val < fdr_thresh & results_annotated$logFC < -lfc_thresh ~ "Down",
+  TRUE                                                                               ~ "NS"
+)
+results_annotated$sig_group <- factor(results_annotated$sig_group,
+                                      levels = c("Up", "Down", "NS"))
+
+# Count each group for legend labels
+n_up   <- sum(results_annotated$sig_group == "Up",   na.rm = TRUE)
+n_down <- sum(results_annotated$sig_group == "Down", na.rm = TRUE)
+n_ns   <- sum(results_annotated$sig_group == "NS",   na.rm = TRUE)
+
+cat("Up:            ", n_up,   "\n")
+cat("Down:          ", n_down, "\n")
+cat("Not significant:", n_ns,   "\n")
+
+# Shared colour scale
+sig_colours <- c("Up"   = "#27AE60",
+                 "Down" = "#E74C3C",
+                 "NS"   = "grey75")
+
+sig_labels <- c(
+  "Up"   = paste0("Up in GATA2 (n=", n_up,   ")"),
+  "Down" = paste0("Down in GATA2 (n=", n_down, ")"),
+  "NS"   = paste0("Not significant (n=", n_ns, ")")
+)
+
+# Top probes to label: top 10 up and top 10 down by adj.P.Val among significant hits
+top_up <- results_annotated |>
+  dplyr::filter(sig_group == "Up") |>
+  dplyr::slice_min(order_by = adj.P.Val, n = 10)
+
+top_down <- results_annotated |>
+  dplyr::filter(sig_group == "Down") |>
+  dplyr::slice_min(order_by = adj.P.Val, n = 10)
+
+top_probes <- rbind(top_up, top_down)
+```
+
+# MA plot
+
+```{r ma_plot, fig.width = 8, fig.height = 6, dpi = 300}
+library(ggplot2)
+library(ggrepel)
+
+ma_plot <- ggplot(results_annotated,
+                  aes(x      = AveExpr,
+                      y      = logFC,
+                      colour = sig_group)) +
+
+  # NS points first so coloured points render on top
+  geom_point(data  = dplyr::filter(results_annotated, sig_group == "NS"),
+             size  = 0.8, alpha = 0.35) +
+  geom_point(data  = dplyr::filter(results_annotated, sig_group != "NS"),
+             size  = 1.2, alpha = 0.85) +
+
+  # Reference lines
+  geom_hline(yintercept = 0,
+             colour = "grey30", linewidth = 0.5) +
+  geom_hline(yintercept = c(-lfc_thresh, lfc_thresh),
+             linetype = "dashed", colour = "grey40", linewidth = 0.4) +
+
+  # Gene symbol labels for top hits
+  ggrepel::geom_text_repel(
+    data           = top_probes,
+    aes(label      = SYMBOL),
+    size           = 2.8,
+    fontface       = "italic",
+    show.legend    = FALSE,
+    max.overlaps   = Inf,
+    box.padding    = 0.4,
+    point.padding  = 0.3,
+    segment.colour = "grey50",
+    segment.size   = 0.3
+  ) +
+
+  scale_colour_manual(
+    name   = NULL,
+    values = sig_colours,
+    labels = sig_labels
+  ) +
+
+  labs(
+    title    = "MA plot — GATA2 vs control",
+    subtitle = paste0("FDR < ", fdr_thresh, " and |log\u2082FC| > ", lfc_thresh,
+                      " highlighted (", n_up + n_down, " probes)"),
+    x        = "Average log\u2082 expression (AveExpr)",
+    y        = expression(log[2]~"fold-change (GATA2 / control)")
+  ) +
+
+  theme_bw(base_size = 13) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 14),
+    plot.subtitle    = element_text(colour = "grey40", size = 11),
+    legend.position  = "bottom",
+    legend.text      = element_text(size = 10),
+    panel.grid.minor = element_blank()
+  )
+
+print(ma_plot)
+
+# Save
+png(file.path(out_dir, "MA_plot_GATA2_vs_con.png"),
+    width = 8, height = 6, units = "in", res = 300)
+print(ma_plot)
+dev.off()
+
+cat("MA plot saved to:", file.path(out_dir, "MA_plot_GATA2_vs_con.png"), "\n")
+```
+
+# Volcano plot
+
+```{r volcano_plot, fig.width = 8, fig.height = 7, dpi = 300}
+volcano_plot <- ggplot(results_annotated,
+                       aes(x      = logFC,
+                           y      = -log10(adj.P.Val),
+                           colour = sig_group)) +
+
+  # Reference lines
+  geom_hline(yintercept = -log10(fdr_thresh),
+             linetype = "dashed", colour = "grey40", linewidth = 0.4) +
+  geom_vline(xintercept = c(-lfc_thresh, lfc_thresh),
+             linetype = "dashed", colour = "grey40", linewidth = 0.4) +
+
+  # NS points first so coloured points render on top
+  geom_point(data  = dplyr::filter(results_annotated, sig_group == "NS"),
+             size  = 0.8, alpha = 0.35) +
+  geom_point(data  = dplyr::filter(results_annotated, sig_group != "NS"),
+             size  = 1.2, alpha = 0.85) +
+
+  # Gene symbol labels for top hits
+  ggrepel::geom_text_repel(
+    data           = top_probes,
+    aes(label      = SYMBOL),
+    size           = 2.8,
+    fontface       = "italic",
+    show.legend    = FALSE,
+    max.overlaps   = Inf,
+    box.padding    = 0.4,
+    point.padding  = 0.3,
+    segment.colour = "grey50",
+    segment.size   = 0.3
+  ) +
+
+  scale_colour_manual(
+    name   = NULL,
+    values = sig_colours,
+    labels = sig_labels
+  ) +
+
+  labs(
+    title    = "Volcano plot — GATA2 vs control",
+    subtitle = paste0("FDR < ", fdr_thresh, " and |log\u2082FC| > ", lfc_thresh,
+                      " highlighted (", n_up + n_down, " probes)"),
+    x        = expression(log[2]~"fold-change (GATA2 / control)"),
+    y        = expression(-log[10]~"(FDR-adjusted"~italic(p)*"-value)")
+  ) +
+
+  theme_bw(base_size = 13) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 14),
+    plot.subtitle    = element_text(colour = "grey40", size = 11),
+    legend.position  = "bottom",
+    legend.text      = element_text(size = 10),
+    panel.grid.minor = element_blank()
+  )
+
+print(volcano_plot)
+
+# Save
+png(file.path(out_dir, "volcano_plot_GATA2_vs_con.png"),
+    width = 8, height = 7, units = "in", res = 300)
+print(volcano_plot)
+dev.off()
+
+cat("Volcano plot saved to:", file.path(out_dir, "volcano_plot_GATA2_vs_con.png"), "\n")
 ```
 
 # Session info for reproducibility
