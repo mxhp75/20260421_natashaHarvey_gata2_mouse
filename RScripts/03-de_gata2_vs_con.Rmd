@@ -412,6 +412,68 @@ dev.off()
 cat("Volcano plot saved to:", file.path(out_dir, "volcano_plot_GATA2_vs_con.png"), "\n")
 ```
 
+# Gene-level probe summary table
+
+```{r}
+# For every gene SYMBOL that has at least one significant probe,
+# summarise across all probes mapping to that gene.
+# Concordance is defined as all significant probes pointing in the same direction.
+
+gene_summary <- results_annotated %>%
+  dplyr::group_by(SYMBOL, GENENAME) %>%
+  dplyr::summarise(
+    n_probes        = dplyr::n(),
+    n_sig           = sum(adj.P.Val < fdr_thresh & abs(logFC) > lfc_thresh,
+                          na.rm = TRUE),
+    pct_sig         = round(100 * n_sig / n_probes, 1),
+    mean_logFC_sig  = ifelse(
+      n_sig > 0,
+      round(mean(logFC[adj.P.Val < fdr_thresh & abs(logFC) > lfc_thresh],
+                 na.rm = TRUE), 3),
+      NA_real_
+    ),
+    concordant      = ifelse(
+      n_sig > 1,
+      # All significant probes have the same sign of logFC
+      length(unique(sign(logFC[adj.P.Val < fdr_thresh &
+                                 abs(logFC) > lfc_thresh]))) == 1,
+      # Only one significant probe — concordance not applicable
+      NA
+    ),
+    direction       = dplyr::case_when(
+      n_sig == 0              ~ "None significant",
+      is.na(concordant)       ~ ifelse(mean_logFC_sig > 0,
+                                       "Up (single probe)",
+                                       "Down (single probe)"),
+      concordant & mean_logFC_sig > 0 ~ "Concordant Up",
+      concordant & mean_logFC_sig < 0 ~ "Concordant Down",
+      !concordant                     ~ "Discordant"
+    ),
+    .groups = "drop"
+  ) |>
+  dplyr::filter(n_sig > 0) |>
+  dplyr::arrange(dplyr::desc(pct_sig), dplyr::desc(n_sig))
+
+cat("Genes with at least one significant probe:", nrow(gene_summary), "\n")
+cat("Genes with all probes significant (100%):",
+    sum(gene_summary$pct_sig == 100), "\n")
+cat("Genes with discordant probe directions:",
+    sum(gene_summary$direction == "Discordant", na.rm = TRUE), "\n\n")
+
+print(head(gene_summary, 20))
+
+# Save
+write.csv(
+  gene_summary,
+  file      = file.path(out_dir, "gene_level_probe_summary.csv"),
+  row.names = FALSE,
+  quote     = FALSE
+)
+
+cat("Gene-level summary saved to:",
+    file.path(out_dir, "gene_level_probe_summary.csv"), "\n")
+```
+
 # Session info for reproducibility
 
 ```{r}
