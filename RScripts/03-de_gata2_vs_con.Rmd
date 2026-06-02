@@ -41,7 +41,7 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 if (!requireNamespace("BiocManager", quietly = TRUE))
   install.packages("BiocManager")
 
-required_pkgs <- c("limma", "dplyr", "tidyverse")
+required_pkgs <- c("limma", "tidyverse", "ggplot2", "ggrepel")
 
 for (pkg in required_pkgs) {
   if (!requireNamespace(pkg, quietly = TRUE)) {
@@ -197,10 +197,12 @@ write.table(
 
 saveRDS(
   results_annotated,
-  file = file.path(out_dir, "lmFit_GATA2_vs_con_full.rds")
-)
+  file = file.path(processed_data, "lmFit_GATA2_vs_con_full.rds")
+  )
 
-cat("Results saved to:", file.path(out_dir, "lmFit_GATA2_vs_con_full.csv"), "\n")
+# Fix
+cat("Results saved — TXT:", file.path(out_dir, "lmFit_GATA2_vs_con_full.txt"), "\n")
+cat("Results saved — RDS:", file.path(processed_data, "lmFit_GATA2_vs_con_full.rds"), "\n")
 ```
 
 # Quick summary of results
@@ -217,6 +219,9 @@ cat("Upregulated in GATA2 (logFC > 0, FDR < 0.05):",
           results_annotated$adj.P.Val < 0.05, na.rm = TRUE), "\n")
 cat("Downregulated in GATA2 (logFC < 0, FDR < 0.05):",
     sum(results_annotated$logFC < 0 &
+          results_annotated$adj.P.Val < 0.05, na.rm = TRUE), "\n")
+cat("Sig. & |logFC| > 1 (FDR < 0.05):",
+    sum(abs(results_annotated$logFC) > 1 &
           results_annotated$adj.P.Val < 0.05, na.rm = TRUE), "\n")
 ```
 
