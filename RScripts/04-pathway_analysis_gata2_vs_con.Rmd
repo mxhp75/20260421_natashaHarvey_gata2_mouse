@@ -1,0 +1,743 @@
+---
+title: "04-pathway_analysis_gata2_vs_con"
+author: "Melanie Smith"
+date: "2026-04-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Clean-up environment
+
+```{r}
+rm(list = ls(all.names = TRUE))
+gc()
+options(
+  max.print              = .Machine$integer.max,
+  scipen                 = 999,
+  stringsAsFactors       = FALSE,
+  dplyr.summarise.inform = FALSE
+)
+set.seed(42)
+```
+
+# Set project directories and file paths
+
+```{r}
+project_name  <- "20260421_natashaHarvey_gata2_mouse"
+base_repo_dir <- "/home/melanie-smith/workDir/natashaHarvey"
+
+project_repo_dir <- file.path(base_repo_dir, project_name)
+
+processed_data <- file.path(project_repo_dir, "data", "processed")
+out_dir        <- file.path(project_repo_dir, "outDir")
+downloads_dir  <- file.path(project_repo_dir, "downloads")
+
+# Pathway-specific output subdirectory to keep results organised
+pathway_dir <- file.path(out_dir, "pathway_analysis")
+dir.create(pathway_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Verify all required directories exist
+for (d in c(processed_data, out_dir, downloads_dir)) {
+  if (!dir.exists(d)) {
+    stop("Required directory does not exist: ", d,
+         "\nCreate it or update the path before re-running.")
+  }
+}
+```
+
+# Load libraries
+
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+# CRAN packages
+cran_pkgs <- c("dplyr", "ggplot2", "scales", "RColorBrewer")
+for (pkg in cran_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
+  library(pkg, character.only = TRUE)
+}
+
+# Bioconductor packages
+bioc_pkgs <- c(
+  "clusterProfiler",   # ORA and GSEA framework
+  "enrichplot",        # enrichment plots including GSEA running score
+  "org.Mm.eg.db",      # Mouse gene annotation (Ensembl -> Entrez -> SYMBOL)
+  "msigdbr",           # MSigDB gene sets (Hallmark, TFT)
+  "DOSE"               # required by enrichplot
+)
+for (pkg in bioc_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    BiocManager::install(pkg, ask = FALSE, update = FALSE)
+  }
+  library(pkg, character.only = TRUE)
+}
+```
+
+# Load DE results
+
+```{r}
+# Load full annotated DE results from script 03
+results_annotated <- readRDS(file.path(processed_data,
+                                       "lmFit_GATA2_vs_con_full.rds"))
+
+cat("Loaded DE results:", nrow(results_annotated), "probes\n")
+cat("Columns:", paste(colnames(results_annotated), collapse = ", "), "\n")
+
+# Confirm required columns are present
+required_cols <- c("PROBEID", "SYMBOL", "ENSEMBL", "logFC", "adj.P.Val", "t")
+missing <- setdiff(required_cols, colnames(results_annotated))
+if (length(missing) > 0) {
+  stop("Missing required columns: ", paste(missing, collapse = ", "))
+}
+```
+
+# Load independent expression filter (ania_eset_filt4.csv)
+
+```{r}
+# This file contains Transcript Cluster IDs from an independent microarray
+# analysis of endothelial cells during embryonic development.
+# Only probes present in this list are considered expressed in the relevant
+# cell type and are retained for the ORA analysis.
+#
+# NOTE: To run pathway analysis WITHOUT this filter (second round),
+# comment out the filter step in the ORA section below and set
+# use_ania_filter <- FALSE
+use_ania_filter <- TRUE
+
+ania_filt <- read.csv(file.path(downloads_dir, "ania_eset_filt4.csv"),
+                      stringsAsFactors = FALSE)
+
+# Standardise column name — handle possible whitespace
+colnames(ania_filt) <- trimws(colnames(ania_filt))
+
+if (!"Transcript.Cluster.ID" %in% colnames(ania_filt)) {
+  stop("Expected column 'Transcript Cluster ID' not found in ania_eset_filt4.csv.\n",
+       "Available columns: ", paste(colnames(ania_filt), collapse = ", "))
+}
+
+ania_probes <- as.character(ania_filt[["Transcript.Cluster.ID"]])
+
+cat("Probes in independent expression filter:", length(ania_probes), "\n")
+cat("Probes in DE results matching filter:   ",
+    sum(results_annotated$PROBEID %in% ania_probes), "\n")
+```
+
+# Compute rank metric for GSEA
+
+```{r}
+# Rank metric: sign(logFC) * -log10(adj.P.Val)
+# Combines fold-change direction with statistical confidence.
+# Strongly significant upregulated genes → large positive rank
+# Strongly significant downregulated genes → large negative rank
+# Genes with adj.P.Val close to 1 → rank near 0
+#
+# Guard against adj.P.Val == 0 which produces Inf
+n_zero_pval <- sum(results_annotated$adj.P.Val == 0, na.rm = TRUE)
+if (n_zero_pval > 0) {
+  cat("WARNING:", n_zero_pval,
+      "probes with adj.P.Val == 0 detected. Replacing with minimum non-zero value.\n")
+  min_pval <- min(results_annotated$adj.P.Val[results_annotated$adj.P.Val > 0],
+                  na.rm = TRUE)
+  results_annotated$adj.P.Val[results_annotated$adj.P.Val == 0] <- min_pval
+}
+
+results_annotated$rank <- sign(results_annotated$logFC) *
+                           (-log10(results_annotated$adj.P.Val))
+
+cat("Rank metric summary:\n")
+print(summary(results_annotated$rank))
+```
+
+# Resolve to one value per gene for pathway input
+
+```{r}
+# Pathway analysis requires one value per gene.
+# For each SYMBOL, keep the probe with the most significant adj.P.Val.
+# This is consistent with retaining the most statistically confident
+# representative probe per gene.
+
+# Remove probes with missing SYMBOL
+results_clean <- results_annotated[!is.na(results_annotated$SYMBOL), ]
+
+# Keep best probe per gene (lowest adj.P.Val)
+results_gene <- results_clean[
+  order(results_clean$SYMBOL, results_clean$adj.P.Val), ]
+results_gene <- results_gene[!duplicated(results_gene$SYMBOL), ]
+
+cat("Probes before gene-level collapse:", nrow(results_clean), "\n")
+cat("Unique genes after collapse:      ", nrow(results_gene), "\n")
+```
+
+# Map gene identifiers to Entrez IDs
+
+```{r}
+# clusterProfiler and ReactomePA require Entrez IDs internally.
+# Map from SYMBOL using org.Mm.eg.db (mouse annotation package).
+symbol_to_entrez <- AnnotationDbi::select(
+  org.Mm.eg.db,
+  keys    = results_gene$SYMBOL,
+  columns = c("ENTREZID", "SYMBOL"),
+  keytype = "SYMBOL"
+)
+
+# Keep only unambiguous mappings
+symbol_to_entrez <- symbol_to_entrez[!is.na(symbol_to_entrez$ENTREZID), ]
+symbol_to_entrez <- symbol_to_entrez[!duplicated(symbol_to_entrez$SYMBOL), ]
+
+# Merge Entrez IDs back into gene-level results
+results_gene <- merge(results_gene, symbol_to_entrez, by = "SYMBOL", all.x = FALSE)
+
+cat("Genes with Entrez ID mapping:", nrow(results_gene), "\n")
+```
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 1: OVER-REPRESENTATION ANALYSIS (ORA)
+# Mirrors the original PANTHER analysis threshold:
+#   FDR-adjusted p-value < 0.05 AND |logFC| > 1
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Define ORA gene lists
+
+```{r}
+fdr_thresh <- 0.05
+lfc_thresh <- 1
+
+# Apply significance thresholds
+sig_genes <- results_gene[
+  results_gene$adj.P.Val < fdr_thresh &
+    abs(results_gene$logFC) > lfc_thresh, ]
+
+# ── ANIA FILTER (set use_ania_filter <- FALSE above to skip) ─────────────────
+# Retain only probes expressed in embryonic endothelial cells (independent data)
+# This mirrors the original PANTHER analysis exclusion criterion.
+# To run without this filter, set use_ania_filter <- FALSE at the top.
+if (use_ania_filter) {
+  n_before <- nrow(sig_genes)
+  sig_genes <- sig_genes[sig_genes$PROBEID %in% ania_probes, ]
+  cat("Ania filter applied — probes before:", n_before,
+      "| after:", nrow(sig_genes), "\n")
+} else {
+  cat("Ania filter NOT applied.\n")
+}
+
+# Separate up and down for directional ORA
+sig_up   <- sig_genes[sig_genes$logFC > 0, ]
+sig_down <- sig_genes[sig_genes$logFC < 0, ]
+
+# Entrez ID vectors for ORA input
+entrez_sig      <- sig_genes$ENTREZID
+entrez_up       <- sig_up$ENTREZID
+entrez_down     <- sig_down$ENTREZID
+entrez_universe <- results_gene$ENTREZID   # all tested genes = background
+
+cat("Significant genes (ORA input):", length(entrez_sig),
+    "(", length(entrez_up), "up,", length(entrez_down), "down )\n")
+cat("Universe (background):        ", length(entrez_universe), "genes\n")
+```
+
+# ORA helper function — shared plot style
+
+```{r}
+# Shared dotplot function for consistent ORA visualisation across databases
+plot_ora_dotplot <- function(enrichment_result, title, n_show = 20) {
+  if (is.null(enrichment_result) || nrow(enrichment_result) == 0) {
+    message("No significant terms to plot for: ", title)
+    return(invisible(NULL))
+  }
+  enrichplot::dotplot(
+    enrichment_result,
+    showCategory = n_show,
+    font.size    = 9,
+    title        = title
+  ) +
+    theme(plot.title = element_text(face = "bold", size = 12))
+}
+
+# Helper to save both the result CSV and the plot PNG
+save_ora_results <- function(result_obj, prefix, plot_obj = NULL) {
+  # Save CSV
+  csv_path <- file.path(pathway_dir, paste0(prefix, "_results.csv"))
+  write.csv(as.data.frame(result_obj), file = csv_path, row.names = FALSE)
+  cat("Results saved:", csv_path, "\n")
+
+  # Save plot
+  if (!is.null(plot_obj)) {
+    png_path <- file.path(pathway_dir, paste0(prefix, "_dotplot.png"))
+    png(png_path, width = 10, height = 8, units = "in", res = 300)
+    print(plot_obj)
+    dev.off()
+    cat("Plot saved:   ", png_path, "\n")
+  }
+}
+```
+
+# ORA 1: GO Biological Process
+
+```{r ora_go_bp, fig.width = 10, fig.height = 8}
+ora_go_bp <- clusterProfiler::enrichGO(
+  gene          = entrez_sig,
+  universe      = entrez_universe,
+  OrgDb         = org.Mm.eg.db,
+  ont           = "BP",             # Biological Process
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.2,
+  readable      = TRUE              # convert Entrez IDs back to gene symbols
+)
+
+# Simplify to remove highly redundant GO terms
+ora_go_bp_simplified <- clusterProfiler::simplify(
+  ora_go_bp,
+  cutoff    = 0.7,
+  by        = "p.adjust",
+  select_fun = min
+)
+
+cat("GO BP significant terms (before simplify):", nrow(ora_go_bp),      "\n")
+cat("GO BP significant terms (after simplify): ", nrow(ora_go_bp_simplified), "\n")
+
+p_ora_go_bp <- plot_ora_dotplot(
+  ora_go_bp_simplified,
+  title  = paste0("ORA — GO Biological Process\nGATA2 vs control",
+                  ifelse(use_ania_filter, " (ania filtered)", ""))
+)
+print(p_ora_go_bp)
+
+save_ora_results(ora_go_bp_simplified, "ORA_GO_BP", p_ora_go_bp)
+```
+
+# ORA 2: KEGG
+
+```{r ora_kegg, fig.width = 10, fig.height = 8}
+ora_kegg <- clusterProfiler::enrichKEGG(
+  gene          = entrez_sig,
+  universe      = entrez_universe,
+  organism      = "mmu",            # Mus musculus
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.2
+)
+
+# Convert Entrez IDs to readable gene symbols in output
+ora_kegg <- clusterProfiler::setReadable(ora_kegg,
+                                         OrgDb   = org.Mm.eg.db,
+                                         keyType = "ENTREZID")
+
+cat("KEGG significant pathways:", nrow(ora_kegg), "\n")
+
+p_ora_kegg <- plot_ora_dotplot(
+  ora_kegg,
+  title = paste0("ORA — KEGG Pathways\nGATA2 vs control",
+                 ifelse(use_ania_filter, " (ania filtered)", ""))
+)
+print(p_ora_kegg)
+
+save_ora_results(ora_kegg, "ORA_KEGG", p_ora_kegg)
+```
+
+# ORA 3: Reactome
+
+```{r ora_reactome, fig.width = 10, fig.height = 8}
+# ORA 3: Reactome (via MSigDB C2 Reactome gene sets)
+msig_reactome <- msigdbr::msigdbr(species = "Mus musculus",
+                                   category = "C2",
+                                   subcategory = "CP:REACTOME") |>
+  dplyr::select(gs_name, entrez_gene) |>
+  dplyr::mutate(entrez_gene = as.character(entrez_gene))
+
+ora_reactome <- clusterProfiler::enricher(
+  gene          = entrez_sig,
+  universe      = entrez_universe,
+  TERM2GENE     = msig_reactome,
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.2
+)
+
+ora_reactome <- clusterProfiler::setReadable(ora_reactome,
+                                              OrgDb   = org.Mm.eg.db,
+                                              keyType = "ENTREZID")
+
+cat("Reactome (MSigDB C2) significant pathways:", nrow(ora_reactome), "\n")
+
+p_ora_reactome <- plot_ora_dotplot(
+  ora_reactome,
+  title = paste0("ORA — Reactome Pathways (MSigDB C2)\nGATA2 vs control",
+                 ifelse(use_ania_filter, " (ania filtered)", ""))
+)
+print(p_ora_reactome)
+
+save_ora_results(ora_reactome, "ORA_Reactome", p_ora_reactome)
+```
+
+# ORA 4: MSigDB Hallmark
+
+```{r ora_hallmark, fig.width = 10, fig.height = 8}
+# Retrieve mouse Hallmark gene sets from MSigDB
+msig_hallmark <- msigdbr::msigdbr(species = "Mus musculus",
+                                   category = "H") |>
+  dplyr::select(gs_name, entrez_gene) |>
+  dplyr::mutate(entrez_gene = as.character(entrez_gene))
+
+ora_hallmark <- clusterProfiler::enricher(
+  gene          = entrez_sig,
+  universe      = entrez_universe,
+  TERM2GENE     = msig_hallmark,
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.2
+)
+
+ora_hallmark <- clusterProfiler::setReadable(ora_hallmark,
+                                              OrgDb   = org.Mm.eg.db,
+                                              keyType = "ENTREZID")
+
+cat("MSigDB Hallmark significant gene sets:", nrow(ora_hallmark), "\n")
+
+p_ora_hallmark <- plot_ora_dotplot(
+  ora_hallmark,
+  title = paste0("ORA — MSigDB Hallmark Gene Sets\nGATA2 vs control",
+                 ifelse(use_ania_filter, " (ania filtered)", ""))
+)
+print(p_ora_hallmark)
+
+save_ora_results(ora_hallmark, "ORA_MSigDB_Hallmark", p_ora_hallmark)
+```
+
+# ORA 5: MSigDB C3 Transcription Factor Targets (TFT)
+
+```{r ora_tft, fig.width = 10, fig.height = 8}
+# C3 TFT — transcription factor target gene sets
+# Particularly relevant for a GATA2 knockdown experiment
+msig_tft <- msigdbr::msigdbr(species = "Mus musculus",
+                               category = "C3",
+                               subcategory = "TFT:GTRD") |>
+  dplyr::select(gs_name, entrez_gene) |>
+  dplyr::mutate(entrez_gene = as.character(entrez_gene))
+
+ora_tft <- clusterProfiler::enricher(
+  gene          = entrez_sig,
+  universe      = entrez_universe,
+  TERM2GENE     = msig_tft,
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.2
+)
+
+ora_tft <- clusterProfiler::setReadable(ora_tft,
+                                         OrgDb   = org.Mm.eg.db,
+                                         keyType = "ENTREZID")
+
+cat("MSigDB C3 TFT significant gene sets:", nrow(ora_tft), "\n")
+
+p_ora_tft <- plot_ora_dotplot(
+  ora_tft,
+  title = paste0("ORA — MSigDB C3 Transcription Factor Targets\nGATA2 vs control",
+                 ifelse(use_ania_filter, " (ania filtered)", ""))
+)
+print(p_ora_tft)
+
+save_ora_results(ora_tft, "ORA_MSigDB_TFT", p_ora_tft)
+```
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 2: GENE SET ENRICHMENT ANALYSIS (GSEA)
+# Uses ALL genes ranked by: sign(logFC) * -log10(adj.P.Val)
+# No significance threshold applied — the full ranked list is used
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Build ranked gene vector for GSEA
+
+```{r}
+# Named numeric vector: names = Entrez IDs, values = rank metric
+# Must be sorted in decreasing order for clusterProfiler::GSEA()
+ranked_vec <- results_gene$rank
+names(ranked_vec) <- results_gene$ENTREZID
+
+# Remove any NA names or values
+ranked_vec <- ranked_vec[!is.na(names(ranked_vec)) & !is.na(ranked_vec)]
+
+# Sort descending
+ranked_vec <- sort(ranked_vec, decreasing = TRUE)
+
+cat("Ranked gene vector length:", length(ranked_vec), "\n")
+cat("Rank metric range: [", round(min(ranked_vec), 3),
+    ",", round(max(ranked_vec), 3), "]\n")
+```
+
+# GSEA helper functions
+
+```{r}
+# Shared GSEA dotplot
+plot_gsea_dotplot <- function(gsea_result, title, n_show = 20) {
+  if (is.null(gsea_result) || nrow(gsea_result) == 0) {
+    message("No significant terms to plot for: ", title)
+    return(invisible(NULL))
+  }
+  enrichplot::dotplot(
+    gsea_result,
+    showCategory = n_show,
+    split        = ".sign",       # split by enriched/suppressed
+    font.size    = 9,
+    title        = title
+  ) +
+    facet_grid(. ~ .sign) +
+    theme(plot.title = element_text(face = "bold", size = 12))
+}
+
+# GSEA enrichment plot for top N terms
+plot_gsea_enrichment <- function(gsea_result, prefix, n_top = 5) {
+  if (is.null(gsea_result) || nrow(gsea_result) == 0) {
+    message("No terms to plot enrichment for: ", prefix)
+    return(invisible(NULL))
+  }
+
+  result_df <- as.data.frame(gsea_result)
+
+  # Top N by NES (most positive and most negative)
+  top_pos <- result_df |>
+    dplyr::filter(NES > 0) |>
+    dplyr::slice_max(order_by = NES, n = n_top)
+  top_neg <- result_df |>
+    dplyr::filter(NES < 0) |>
+    dplyr::slice_min(order_by = NES, n = n_top)
+  top_ids <- c(top_pos$ID, top_neg$ID)
+
+  # Plot and save each enrichment plot
+  for (id in top_ids) {
+    term_name <- result_df$Description[result_df$ID == id]
+    safe_name <- gsub("[^A-Za-z0-9_]", "_", term_name)
+    p <- enrichplot::gseaplot2(
+      gsea_result,
+      geneSetID = id,
+      title     = term_name,
+      pvalue_by = "NES"
+    )
+    png_path <- file.path(pathway_dir,
+                          paste0("GSEA_", prefix, "_enrichplot_",
+                                 safe_name, ".png"))
+    png(png_path, width = 10, height = 6, units = "in", res = 300)
+    print(p)
+    dev.off()
+    cat("Enrichment plot saved:", png_path, "\n")
+  }
+}
+
+# Save GSEA CSV and dotplot
+save_gsea_results <- function(result_obj, prefix, plot_obj = NULL) {
+  csv_path <- file.path(pathway_dir, paste0(prefix, "_results.csv"))
+  write.csv(as.data.frame(result_obj), file = csv_path, row.names = FALSE)
+  cat("Results saved:", csv_path, "\n")
+
+  if (!is.null(plot_obj)) {
+    png_path <- file.path(pathway_dir, paste0(prefix, "_dotplot.png"))
+    png(png_path, width = 10, height = 8, units = "in", res = 300)
+    print(plot_obj)
+    dev.off()
+    cat("Plot saved:   ", png_path, "\n")
+  }
+}
+```
+
+# GSEA 1: GO Biological Process
+
+```{r gsea_go_bp, fig.width = 10, fig.height = 8}
+gsea_go_bp <- clusterProfiler::gseGO(
+  geneList      = ranked_vec,
+  OrgDb         = org.Mm.eg.db,
+  ont           = "BP",
+  keyType       = "ENTREZID",
+  minGSSize     = 15,
+  maxGSSize     = 500,
+  pvalueCutoff  = 0.05,
+  pAdjustMethod = "BH",
+  verbose       = FALSE,
+  seed          = TRUE      # reproducibility
+)
+
+gsea_go_bp <- clusterProfiler::setReadable(gsea_go_bp,
+                                            OrgDb   = org.Mm.eg.db,
+                                            keyType = "ENTREZID")
+
+cat("GSEA GO BP significant terms:", nrow(gsea_go_bp), "\n")
+
+p_gsea_go_bp <- plot_gsea_dotplot(gsea_go_bp,
+                                   title = "GSEA — GO Biological Process\nGATA2 vs control")
+print(p_gsea_go_bp)
+
+save_gsea_results(gsea_go_bp, "GSEA_GO_BP", p_gsea_go_bp)
+plot_gsea_enrichment(gsea_go_bp, prefix = "GO_BP", n_top = 5)
+```
+
+# GSEA 2: KEGG
+
+```{r gsea_kegg, fig.width = 10, fig.height = 8}
+gsea_kegg <- clusterProfiler::gseKEGG(
+  geneList      = ranked_vec,
+  organism      = "mmu",
+  minGSSize     = 15,
+  maxGSSize     = 500,
+  pvalueCutoff  = 0.05,
+  pAdjustMethod = "BH",
+  verbose       = FALSE,
+  seed          = TRUE
+)
+
+gsea_kegg <- clusterProfiler::setReadable(gsea_kegg,
+                                           OrgDb   = org.Mm.eg.db,
+                                           keyType = "ENTREZID")
+
+cat("GSEA KEGG significant pathways:", nrow(gsea_kegg), "\n")
+
+p_gsea_kegg <- plot_gsea_dotplot(gsea_kegg,
+                                  title = "GSEA — KEGG Pathways\nGATA2 vs control")
+print(p_gsea_kegg)
+
+save_gsea_results(gsea_kegg, "GSEA_KEGG", p_gsea_kegg)
+plot_gsea_enrichment(gsea_kegg, prefix = "KEGG", n_top = 5)
+```
+
+# GSEA 3: Reactome
+
+```{r gsea_reactome, fig.width = 10, fig.height = 8}
+# GSEA 3: Reactome (via MSigDB C2 Reactome gene sets)
+gsea_reactome <- clusterProfiler::GSEA(
+  geneList      = ranked_vec,
+  TERM2GENE     = msig_reactome,   # reuses object created in ORA chunk above
+  minGSSize     = 15,
+  maxGSSize     = 500,
+  pvalueCutoff  = 0.05,
+  pAdjustMethod = "BH",
+  verbose       = FALSE,
+  seed          = TRUE
+)
+
+gsea_reactome <- clusterProfiler::setReadable(gsea_reactome,
+                                               OrgDb   = org.Mm.eg.db,
+                                               keyType = "ENTREZID")
+
+cat("GSEA Reactome (MSigDB C2) significant pathways:", nrow(gsea_reactome), "\n")
+
+p_gsea_reactome <- plot_gsea_dotplot(gsea_reactome,
+                                      title = "GSEA — Reactome Pathways (MSigDB C2)\nGATA2 vs control")
+print(p_gsea_reactome)
+
+save_gsea_results(gsea_reactome, "GSEA_Reactome", p_gsea_reactome)
+plot_gsea_enrichment(gsea_reactome, prefix = "Reactome", n_top = 5)
+```
+
+# GSEA 4: MSigDB Hallmark
+
+```{r gsea_hallmark, fig.width = 10, fig.height = 8}
+msig_hallmark_gsea <- msigdbr::msigdbr(species = "Mus musculus",
+                                        category = "H") |>
+  dplyr::select(gs_name, entrez_gene) |>
+  dplyr::mutate(entrez_gene = as.character(entrez_gene))
+
+gsea_hallmark <- clusterProfiler::GSEA(
+  geneList      = ranked_vec,
+  TERM2GENE     = msig_hallmark_gsea,
+  minGSSize     = 15,
+  maxGSSize     = 500,
+  pvalueCutoff  = 0.05,
+  pAdjustMethod = "BH",
+  verbose       = FALSE,
+  seed          = TRUE
+)
+
+gsea_hallmark <- clusterProfiler::setReadable(gsea_hallmark,
+                                               OrgDb   = org.Mm.eg.db,
+                                               keyType = "ENTREZID")
+
+cat("GSEA MSigDB Hallmark significant gene sets:", nrow(gsea_hallmark), "\n")
+
+p_gsea_hallmark <- plot_gsea_dotplot(gsea_hallmark,
+                                      title = "GSEA — MSigDB Hallmark Gene Sets\nGATA2 vs control")
+print(p_gsea_hallmark)
+
+save_gsea_results(gsea_hallmark, "GSEA_MSigDB_Hallmark", p_gsea_hallmark)
+plot_gsea_enrichment(gsea_hallmark, prefix = "Hallmark", n_top = 5)
+```
+
+# GSEA 5: MSigDB C3 Transcription Factor Targets
+
+```{r gsea_tft, fig.width = 10, fig.height = 8}
+msig_tft_gsea <- msigdbr::msigdbr(species = "Mus musculus",
+                                   category = "C3",
+                                   subcategory = "TFT:GTRD") |>
+  dplyr::select(gs_name, entrez_gene) |>
+  dplyr::mutate(entrez_gene = as.character(entrez_gene))
+
+gsea_tft <- clusterProfiler::GSEA(
+  geneList      = ranked_vec,
+  TERM2GENE     = msig_tft_gsea,
+  minGSSize     = 15,
+  maxGSSize     = 500,
+  pvalueCutoff  = 0.05,
+  pAdjustMethod = "BH",
+  verbose       = FALSE,
+  seed          = TRUE
+)
+
+gsea_tft <- clusterProfiler::setReadable(gsea_tft,
+                                          OrgDb   = org.Mm.eg.db,
+                                          keyType = "ENTREZID")
+
+cat("GSEA MSigDB C3 TFT significant gene sets:", nrow(gsea_tft), "\n")
+
+p_gsea_tft <- plot_gsea_dotplot(gsea_tft,
+                                 title = "GSEA — MSigDB C3 Transcription Factor Targets\nGATA2 vs control")
+print(p_gsea_tft)
+
+save_gsea_results(gsea_tft, "GSEA_MSigDB_TFT", p_gsea_tft)
+plot_gsea_enrichment(gsea_tft, prefix = "TFT", n_top = 5)
+```
+
+# Summary of all pathway results
+
+```{r}
+# Compile a brief summary of significant terms found across all analyses
+summary_tbl <- data.frame(
+  Analysis  = c("ORA — GO BP", "ORA — KEGG", "ORA — Reactome",
+                 "ORA — Hallmark", "ORA — TFT",
+                 "GSEA — GO BP", "GSEA — KEGG", "GSEA — Reactome",
+                 "GSEA — Hallmark", "GSEA — TFT"),
+  Method    = c(rep("ORA", 5), rep("GSEA", 5)),
+  Database  = c("GO BP", "KEGG", "Reactome", "MSigDB Hallmark", "MSigDB C3 TFT",
+                 "GO BP", "KEGG", "Reactome", "MSigDB Hallmark", "MSigDB C3 TFT"),
+  N_sig     = c(
+    nrow(ora_go_bp_simplified), nrow(ora_kegg),
+    nrow(ora_reactome),         nrow(ora_hallmark),
+    nrow(ora_tft),
+    nrow(gsea_go_bp),           nrow(gsea_kegg),
+    nrow(gsea_reactome),        nrow(gsea_hallmark),
+    nrow(gsea_tft)
+  )
+)
+
+cat("=== Pathway analysis summary ===\n")
+print(summary_tbl)
+
+write.csv(summary_tbl,
+          file      = file.path(pathway_dir, "pathway_analysis_summary.csv"),
+          row.names = FALSE)
+
+cat("\nSummary table saved to:",
+    file.path(pathway_dir, "pathway_analysis_summary.csv"), "\n")
+```
+
+# Session info for reproducibility
+
+```{r}
+writeLines(
+  capture.output(sessionInfo()),
+  file.path(out_dir, "sessionInfo_pathway_analysis.txt")
+)
+
+cat("Pathway analysis complete.\n")
+cat("All results saved to:", pathway_dir, "\n")
+```
