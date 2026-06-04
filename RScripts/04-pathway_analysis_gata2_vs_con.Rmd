@@ -23,6 +23,13 @@ options(
 set.seed(42)
 ```
 
+```{r}
+# Set filter — pathway_dir depends on both
+use_ania_filter <- FALSE
+filter_suffix   <- ifelse(use_ania_filter, "_ania_filter", "_no_filter")
+```
+
+
 # Set project directories and file paths
 
 ```{r}
@@ -36,8 +43,13 @@ out_dir        <- file.path(project_repo_dir, "outDir")
 downloads_dir  <- file.path(project_repo_dir, "downloads")
 
 # Pathway-specific output subdirectory to keep results organised
-pathway_dir <- file.path(out_dir, "pathway_analysis")
+pathway_dir <- file.path(
+  out_dir,
+  "pathway_analysis",
+  ifelse(use_ania_filter, "ania_filtered", "no_filter")
+)
 dir.create(pathway_dir, recursive = TRUE, showWarnings = FALSE)
+cat("Pathway output directory:", pathway_dir, "\n")
 
 # Verify all required directories exist
 for (d in c(processed_data, out_dir, downloads_dir)) {
@@ -101,12 +113,8 @@ if (length(missing) > 0) {
 # This file contains Transcript Cluster IDs from an independent microarray
 # analysis of endothelial cells during embryonic development.
 # Only probes present in this list are considered expressed in the relevant
-# cell type and are retained for the ORA analysis.
-#
-# NOTE: To run pathway analysis WITHOUT this filter (second round),
-# comment out the filter step in the ORA section below and set
-# use_ania_filter <- FALSE
-use_ania_filter <- TRUE
+# cell type and are retained for the ORA analysis when filter is TRUE.
+
 
 ania_filt <- read.csv(file.path(downloads_dir, "ania_eset_filt4.csv"),
                       stringsAsFactors = FALSE)
@@ -197,7 +205,7 @@ cat("Genes with Entrez ID mapping:", nrow(results_gene), "\n")
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 1: OVER-REPRESENTATION ANALYSIS (ORA)
 # Mirrors the original PANTHER analysis threshold:
-#   FDR-adjusted p-value < 0.05 AND |logFC| > 1
+# FDR-adjusted p-value < 0.05 AND |logFC| > 1
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Define ORA gene lists
@@ -259,11 +267,17 @@ plot_ora_dotplot <- function(enrichment_result, title, n_show = 20) {
 
 # Helper to save both the result CSV and the plot PNG
 save_ora_results <- function(result_obj, prefix, plot_obj = NULL) {
+  
+  # Save results object to global environment with prefix-based name
+  obj_name <- paste0(prefix, "_df")
+  assign(obj_name, as.data.frame(result_obj), envir = .GlobalEnv)
+  cat("Object created in environment:", obj_name, "\n")
+  
   # Save CSV
   csv_path <- file.path(pathway_dir, paste0(prefix, "_results.csv"))
   write.csv(as.data.frame(result_obj), file = csv_path, row.names = FALSE)
   cat("Results saved:", csv_path, "\n")
-
+  
   # Save plot
   if (!is.null(plot_obj)) {
     png_path <- file.path(pathway_dir, paste0(prefix, "_dotplot.png"))
@@ -307,7 +321,7 @@ p_ora_go_bp <- plot_ora_dotplot(
 )
 print(p_ora_go_bp)
 
-save_ora_results(ora_go_bp_simplified, "ORA_GO_BP", p_ora_go_bp)
+save_ora_results(ora_go_bp_simplified, paste0("ORA_GO_BP", filter_suffix), p_ora_go_bp)
 ```
 
 # ORA 2: KEGG
@@ -336,7 +350,7 @@ p_ora_kegg <- plot_ora_dotplot(
 )
 print(p_ora_kegg)
 
-save_ora_results(ora_kegg, "ORA_KEGG", p_ora_kegg)
+save_ora_results(ora_kegg, paste0("ORA_KEGG", filter_suffix), p_ora_kegg)
 ```
 
 # ORA 3: Reactome
@@ -371,7 +385,7 @@ p_ora_reactome <- plot_ora_dotplot(
 )
 print(p_ora_reactome)
 
-save_ora_results(ora_reactome, "ORA_Reactome", p_ora_reactome)
+save_ora_results(ora_reactome, paste0("ORA_Reactome", filter_suffix), p_ora_reactome)
 ```
 
 # ORA 4: MSigDB Hallmark
@@ -405,7 +419,7 @@ p_ora_hallmark <- plot_ora_dotplot(
 )
 print(p_ora_hallmark)
 
-save_ora_results(ora_hallmark, "ORA_MSigDB_Hallmark", p_ora_hallmark)
+save_ora_results(ora_hallmark, paste0("ORA_MSigDB_Hallmark", filter_suffix), p_ora_hallmark)
 ```
 
 # ORA 5: MSigDB C3 Transcription Factor Targets (TFT)
@@ -441,7 +455,7 @@ p_ora_tft <- plot_ora_dotplot(
 )
 print(p_ora_tft)
 
-save_ora_results(ora_tft, "ORA_MSigDB_TFT", p_ora_tft)
+save_ora_results(ora_tft, paste0("ORA_MSigDB_TFT", filter_suffix), p_ora_tft)
 ```
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -489,56 +503,95 @@ plot_gsea_dotplot <- function(gsea_result, title, n_show = 20) {
     theme(plot.title = element_text(face = "bold", size = 12))
 }
 
-# GSEA enrichment plot for top N terms
-plot_gsea_enrichment <- function(gsea_result, prefix, n_top = 5) {
-  if (is.null(gsea_result) || nrow(gsea_result) == 0) {
-    message("No terms to plot enrichment for: ", prefix)
-    return(invisible(NULL))
-  }
 
-  result_df <- as.data.frame(gsea_result)
+# # Save GSEA CSV and dotplot
+# save_gsea_results <- function(result_obj, prefix, plot_obj = NULL) {
+#   csv_path <- file.path(pathway_dir, paste0(prefix, "_results.csv"))
+#   write.csv(as.data.frame(result_obj), file = csv_path, row.names = FALSE)
+#   cat("Results saved:", csv_path, "\n")
+# 
+#   if (!is.null(plot_obj)) {
+#     png_path <- file.path(pathway_dir, paste0(prefix, "_dotplot.png"))
+#     png(png_path, width = 10, height = 8, units = "in", res = 300)
+#     print(plot_obj)
+#     dev.off()
+#     cat("Plot saved:   ", png_path, "\n")
+#   }
+# }
 
-  # Top N by NES (most positive and most negative)
-  top_pos <- result_df |>
-    dplyr::filter(NES > 0) |>
-    dplyr::slice_max(order_by = NES, n = n_top)
-  top_neg <- result_df |>
-    dplyr::filter(NES < 0) |>
-    dplyr::slice_min(order_by = NES, n = n_top)
-  top_ids <- c(top_pos$ID, top_neg$ID)
-
-  # Plot and save each enrichment plot
-  for (id in top_ids) {
-    term_name <- result_df$Description[result_df$ID == id]
-    safe_name <- gsub("[^A-Za-z0-9_]", "_", term_name)
-    p <- enrichplot::gseaplot2(
-      gsea_result,
-      geneSetID = id,
-      title     = term_name,
-      pvalue_by = "NES"
-    )
-    png_path <- file.path(pathway_dir,
-                          paste0("GSEA_", prefix, "_enrichplot_",
-                                 safe_name, ".png"))
-    png(png_path, width = 10, height = 6, units = "in", res = 300)
-    print(p)
-    dev.off()
-    cat("Enrichment plot saved:", png_path, "\n")
-  }
-}
-
-# Save GSEA CSV and dotplot
 save_gsea_results <- function(result_obj, prefix, plot_obj = NULL) {
+  
+  # Save results object to global environment with prefix-based name
+  obj_name <- paste0(prefix, "_df")
+  assign(obj_name, as.data.frame(result_obj), envir = .GlobalEnv)
+  cat("Object created in environment:", obj_name, "\n")
+  
+  # Save CSV
   csv_path <- file.path(pathway_dir, paste0(prefix, "_results.csv"))
   write.csv(as.data.frame(result_obj), file = csv_path, row.names = FALSE)
   cat("Results saved:", csv_path, "\n")
-
+  
+  # Save dotplot
   if (!is.null(plot_obj)) {
     png_path <- file.path(pathway_dir, paste0(prefix, "_dotplot.png"))
     png(png_path, width = 10, height = 8, units = "in", res = 300)
     print(plot_obj)
     dev.off()
     cat("Plot saved:   ", png_path, "\n")
+  }
+}
+
+# generates and saves gseaplot2 enrichment plots
+plot_gsea_enrichment <- function(gsea_result, prefix, n_top = 5) {
+  if (is.null(gsea_result) || nrow(gsea_result) == 0) {
+    message("No terms to plot enrichment for: ", prefix)
+    return(invisible(NULL))
+  }
+  
+  result_df <- as.data.frame(gsea_result)
+  
+  # Top N by NES — most positive and most negative
+  top_pos <- result_df %>%
+    dplyr::filter(NES > 1.5) %>%
+    dplyr::slice_max(order_by = NES, n = n_top)
+  
+  top_neg <- result_df %>%
+    dplyr::filter(NES < -1.5) %>%
+    dplyr::slice_min(order_by = NES, n = n_top)
+  
+  top_ids <- c(top_pos$ID, top_neg$ID)
+  
+  if (length(top_ids) == 0) {
+    message("No top terms found for: ", prefix)
+    return(invisible(NULL))
+  }
+  
+  for (id in top_ids) {
+    term_name <- result_df$Description[result_df$ID == id]
+    safe_name <- gsub("[^A-Za-z0-9_]", "_", term_name)
+    
+    # gseaplot2 produces the classic running enrichment score +
+    # ranked gene list bar plot
+    p <- enrichplot::gseaplot2(
+      gsea_result,
+      geneSetID  = id,
+      title      = term_name,
+      color      = "#E74C3C",     # running score line colour
+      base_size  = 11,
+      rel_heights = c(1.5, 0.5, 1)  # panel height ratios: ES, ticks, rank
+    )
+    
+    png_path <- file.path(
+      pathway_dir,
+      paste0("GSEA_enrichplot_", prefix, "_", safe_name, "_",
+             filter_suffix, ".png")
+    )
+    
+    png(png_path, width = 10, height = 6, units = "in", res = 300)
+    print(p)
+    dev.off()
+    
+    cat("Enrichment plot saved:", png_path, "\n")
   }
 }
 ```
@@ -557,7 +610,16 @@ gsea_go_bp <- clusterProfiler::gseGO(
   pAdjustMethod = "BH",
   verbose       = FALSE,
   seed          = TRUE      # reproducibility
-)
+  )
+
+gsea_go_bp <- clusterProfiler::simplify(
+  gsea_go_bp,
+  cutoff     = 0.7,
+  by         = "p.adjust",
+  select_fun = min
+  )
+
+cat("GSEA GO BP terms after simplify:", nrow(gsea_go_bp), "\n")
 
 gsea_go_bp <- clusterProfiler::setReadable(gsea_go_bp,
                                             OrgDb   = org.Mm.eg.db,
@@ -569,7 +631,7 @@ p_gsea_go_bp <- plot_gsea_dotplot(gsea_go_bp,
                                    title = "GSEA — GO Biological Process\nGATA2 vs control")
 print(p_gsea_go_bp)
 
-save_gsea_results(gsea_go_bp, "GSEA_GO_BP", p_gsea_go_bp)
+save_gsea_results(gsea_go_bp, paste0("GSEA_GO_BP", filter_suffix), p_gsea_go_bp)
 plot_gsea_enrichment(gsea_go_bp, prefix = "GO_BP", n_top = 5)
 ```
 
@@ -597,7 +659,7 @@ p_gsea_kegg <- plot_gsea_dotplot(gsea_kegg,
                                   title = "GSEA — KEGG Pathways\nGATA2 vs control")
 print(p_gsea_kegg)
 
-save_gsea_results(gsea_kegg, "GSEA_KEGG", p_gsea_kegg)
+save_gsea_results(gsea_kegg, paste0("GSEA_KEGG", filter_suffix), p_gsea_kegg)
 plot_gsea_enrichment(gsea_kegg, prefix = "KEGG", n_top = 5)
 ```
 
@@ -626,7 +688,7 @@ p_gsea_reactome <- plot_gsea_dotplot(gsea_reactome,
                                       title = "GSEA — Reactome Pathways (MSigDB C2)\nGATA2 vs control")
 print(p_gsea_reactome)
 
-save_gsea_results(gsea_reactome, "GSEA_Reactome", p_gsea_reactome)
+save_gsea_results(gsea_reactome, paste0("GSEA_Reactome", filter_suffix), p_gsea_reactome)
 plot_gsea_enrichment(gsea_reactome, prefix = "Reactome", n_top = 5)
 ```
 
@@ -659,17 +721,20 @@ p_gsea_hallmark <- plot_gsea_dotplot(gsea_hallmark,
                                       title = "GSEA — MSigDB Hallmark Gene Sets\nGATA2 vs control")
 print(p_gsea_hallmark)
 
-save_gsea_results(gsea_hallmark, "GSEA_MSigDB_Hallmark", p_gsea_hallmark)
+save_gsea_results(gsea_hallmark, paste0("GSEA_MSigDB_Hallmark", filter_suffix), p_gsea_hallmark)
 plot_gsea_enrichment(gsea_hallmark, prefix = "Hallmark", n_top = 5)
+
+# plot and save GSEA enrichment plot
+plot_gsea_enrichment(gsea_hallmark , prefix = "GSEA_MSigDB_Hallmark", n_top = 5)
 ```
 
 # GSEA 5: MSigDB C3 Transcription Factor Targets
 
 ```{r gsea_tft, fig.width = 10, fig.height = 8}
 msig_tft_gsea <- msigdbr::msigdbr(species = "Mus musculus",
-                                   category = "C3",
-                                   subcategory = "TFT:GTRD") |>
-  dplyr::select(gs_name, entrez_gene) |>
+                                  category = "C3",
+                                  subcategory = "TFT:GTRD") %>%
+  dplyr::select(gs_name, entrez_gene) %>%
   dplyr::mutate(entrez_gene = as.character(entrez_gene))
 
 gsea_tft <- clusterProfiler::GSEA(
@@ -693,7 +758,7 @@ p_gsea_tft <- plot_gsea_dotplot(gsea_tft,
                                  title = "GSEA — MSigDB C3 Transcription Factor Targets\nGATA2 vs control")
 print(p_gsea_tft)
 
-save_gsea_results(gsea_tft, "GSEA_MSigDB_TFT", p_gsea_tft)
+save_gsea_results(gsea_tft, paste0("GSEA_MSigDB_TFT_", filter_suffix), p_gsea_tft)
 plot_gsea_enrichment(gsea_tft, prefix = "TFT", n_top = 5)
 ```
 
@@ -706,18 +771,22 @@ summary_tbl <- data.frame(
                  "ORA — Hallmark", "ORA — TFT",
                  "GSEA — GO BP", "GSEA — KEGG", "GSEA — Reactome",
                  "GSEA — Hallmark", "GSEA — TFT"),
-  Method    = c(rep("ORA", 5), rep("GSEA", 5)),
+  Method    = c(rep("ORA", 10), rep("GSEA", 10)),
   Database  = c("GO BP", "KEGG", "Reactome", "MSigDB Hallmark", "MSigDB C3 TFT",
                  "GO BP", "KEGG", "Reactome", "MSigDB Hallmark", "MSigDB C3 TFT"),
   N_sig     = c(
-    nrow(ora_go_bp_simplified), nrow(ora_kegg),
-    nrow(ora_reactome),         nrow(ora_hallmark),
+    nrow(ora_go_bp_simplified),
+    nrow(ora_kegg),
+    nrow(ora_reactome),
+    nrow(ora_hallmark),
     nrow(ora_tft),
-    nrow(gsea_go_bp),           nrow(gsea_kegg),
-    nrow(gsea_reactome),        nrow(gsea_hallmark),
+    nrow(gsea_go_bp), 
+    nrow(gsea_kegg),
+    nrow(gsea_reactome), 
+    nrow(gsea_hallmark),
     nrow(gsea_tft)
+    )
   )
-)
 
 cat("=== Pathway analysis summary ===\n")
 print(summary_tbl)
@@ -729,6 +798,22 @@ write.csv(summary_tbl,
 cat("\nSummary table saved to:",
     file.path(pathway_dir, "pathway_analysis_summary.csv"), "\n")
 ```
+
+# assess leading edge genes
+
+```{r}
+
+
+# # Extract leading edge genes for HALLMARK_OXIDATIVE_PHOSPHORYLATION
+# gsea_hallmark_df <- as.data.frame(gsea_hallmark)
+# 
+# leading_edge <- gsea_hallmark_df |>
+#   dplyr::filter(Description == "HALLMARK_OXIDATIVE_PHOSPHORYLATION") |>
+#   dplyr::pull(core_enrichment)
+# 
+# cat(leading_edge)
+```
+
 
 # Session info for reproducibility
 
