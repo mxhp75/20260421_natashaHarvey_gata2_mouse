@@ -41,7 +41,7 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 if (!requireNamespace("BiocManager", quietly = TRUE))
   install.packages("BiocManager")
 
-required_pkgs <- c("limma", "tidyverse", "ggplot2", "ggrepel")
+required_pkgs <- c("limma", "tidyverse", "ggplot2", "ggrepel", "Biobase")
 
 for (pkg in required_pkgs) {
   if (!requireNamespace(pkg, quietly = TRUE)) {
@@ -251,8 +251,8 @@ cat("Down:          ", n_down, "\n")
 cat("Not significant:", n_ns,   "\n")
 
 # Shared colour scale
-sig_colours <- c("Up"   = "#27AE60",
-                 "Down" = "#E74C3C",
+sig_colours <- c("Up"   = "#E74C3C",
+                 "Down" = "#2a16db",
                  "NS"   = "grey75")
 
 sig_labels <- c(
@@ -264,11 +264,11 @@ sig_labels <- c(
 # Top probes to label: top 10 up and top 10 down by adj.P.Val among significant hits
 top_up <- results_annotated |>
   dplyr::filter(sig_group == "Up") |>
-  dplyr::slice_min(order_by = adj.P.Val, n = 10)
+  dplyr::slice_min(order_by = adj.P.Val, n = 6)
 
 top_down <- results_annotated |>
   dplyr::filter(sig_group == "Down") |>
-  dplyr::slice_min(order_by = adj.P.Val, n = 10)
+  dplyr::slice_min(order_by = adj.P.Val, n = 6)
 
 top_probes <- rbind(top_up, top_down)
 ```
@@ -276,8 +276,6 @@ top_probes <- rbind(top_up, top_down)
 # MA plot
 
 ```{r ma_plot, fig.width = 8, fig.height = 6, dpi = 300}
-library(ggplot2)
-library(ggrepel)
 
 ma_plot <- ggplot(results_annotated,
                   aes(x      = AveExpr,
@@ -348,67 +346,88 @@ cat("MA plot saved to:", file.path(out_dir, "MA_plot_GATA2_vs_con.png"), "\n")
 
 ```{r volcano_plot, fig.width = 8, fig.height = 7, dpi = 300}
 volcano_plot <- ggplot(results_annotated,
-                       aes(x      = logFC,
-                           y      = -log10(adj.P.Val),
-                           colour = sig_group)) +
-
-  # Reference lines
-  geom_hline(yintercept = -log10(fdr_thresh),
-             linetype = "dashed", colour = "grey40", linewidth = 0.4) +
-  geom_vline(xintercept = c(-lfc_thresh, lfc_thresh),
-             linetype = "dashed", colour = "grey40", linewidth = 0.4) +
+       aes(x      = logFC,
+           y      = -log10(adj.P.Val),
+           colour = sig_group)
+       ) +
+  
+  scale_x_continuous(
+    breaks = scales::breaks_width(1)
+  ) +
 
   # NS points first so coloured points render on top
   geom_point(data  = dplyr::filter(results_annotated, sig_group == "NS"),
              size  = 0.8, alpha = 0.35) +
   geom_point(data  = dplyr::filter(results_annotated, sig_group != "NS"),
              size  = 1.2, alpha = 0.85) +
-
-  # Gene symbol labels for top hits
+  
+  # Gene symbol labels for top hits - up only (red)
   ggrepel::geom_text_repel(
-    data           = top_probes,
+    data           = dplyr::filter(top_probes, sig_group == "Up"),
     aes(label      = SYMBOL),
-    size           = 2.8,
+    size           = 4,
     fontface       = "italic",
     show.legend    = FALSE,
     max.overlaps   = Inf,
-    box.padding    = 0.4,
-    point.padding  = 0.3,
-    segment.colour = "grey50",
-    segment.size   = 0.3
+    force          = 3,
+    box.padding    = 0.7,
+    point.padding  = 0.4,
+    segment.colour = "black",
+    segment.size   = 0.3,
+    min.segment.length = 0
   ) +
 
+  # Gene symbol labels for top hits - Down only (blue)
+  ggrepel::geom_text_repel(
+    data           = dplyr::filter(top_probes, sig_group == "Down"),
+    aes(label      = SYMBOL),
+    size           = 4,
+    fontface       = "italic",
+    show.legend    = FALSE,
+    max.overlaps   = Inf,
+    force          = 3,
+    box.padding    = 0.47,
+    point.padding  = 0.3,
+    segment.colour = "black",
+    segment.size   = 0.3,
+    min.segment.length = 0
+  ) +
+  
   scale_colour_manual(
     name   = NULL,
     values = sig_colours,
     labels = sig_labels
   ) +
-
+  
   labs(
-    title    = "Volcano plot — GATA2 vs control",
-    subtitle = paste0("FDR < ", fdr_thresh, " and |log\u2082FC| > ", lfc_thresh,
-                      " highlighted (", n_up + n_down, " probes)"),
     x        = expression(log[2]~"fold-change (GATA2 / control)"),
     y        = expression(-log[10]~"(FDR-adjusted"~italic(p)*"-value)")
   ) +
-
-  theme_bw(base_size = 13) +
+  
+theme_classic(base_size = 13, base_family = "Helvetica") +
   theme(
-    plot.title       = element_text(face = "bold", size = 14),
-    plot.subtitle    = element_text(colour = "grey40", size = 11),
-    legend.position  = "bottom",
-    legend.text      = element_text(size = 10),
-    panel.grid.minor = element_blank()
+    # All text black and Helvetica
+    text             = element_text(family = "Helvetica", colour = "black"),
+    axis.text        = element_text(family = "Helvetica", colour = "black"),
+    
+    # Remove colour legend
+    legend.position  = "none",
+    
+    # Solid black x- and y-axis lines
+    axis.line        = element_line(colour = "black", linewidth = 0.5),
+    
+    # Remove all grid lines and panel border
+    panel.grid       = element_blank(),
+    panel.border     = element_blank()
   )
 
 print(volcano_plot)
 
-# Save
-png(file.path(out_dir, "volcano_plot_GATA2_vs_con.png"),
-    width = 8, height = 7, units = "in", res = 300)
+svg(file.path(out_dir, "volcano_plot_GATA2_vs_con.svg"),
+    width  = 4.76,
+    height = 5)
 print(volcano_plot)
 dev.off()
-
 cat("Volcano plot saved to:", file.path(out_dir, "volcano_plot_GATA2_vs_con.png"), "\n")
 ```
 
