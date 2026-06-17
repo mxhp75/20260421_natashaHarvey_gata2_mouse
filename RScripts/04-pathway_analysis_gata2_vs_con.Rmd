@@ -728,6 +728,121 @@ plot_gsea_enrichment(gsea_hallmark, prefix = "Hallmark", n_top = 5)
 plot_gsea_enrichment(gsea_hallmark , prefix = "GSEA_MSigDB_Hallmark", n_top = 5)
 ```
 
+# GSEA enrichment plot
+
+```{r}
+
+# --- Define pathways of interest ---
+gobp_pathways <- c(
+  "homotypic cell-cell adhesion",
+  "platelet activation",
+  "aortic valve development",
+  "endothelial cell migration",
+  "endothelial cell differentiation",
+  "regulation of vascular endothelial growth factor receptor signaling pathway",
+  "vascular endothelial growth factor receptor signaling pathway",
+  "regulation of endothelial cell migration",
+  "detection of mechanical stimulus"
+)
+
+kegg_pathways <- c(
+  "Hematopoietic cell lineage",
+  "Cell adhesion molecule (CAM) interaction",
+  "Complement and coagulation cascades"
+)
+
+# --- Extract and label rows from each data frame ---
+gobp_selected <- GSEA_GO_BP_no_filter_df %>%
+  dplyr::filter(Description %in% gobp_pathways) %>%
+  dplyr::select(Description, NES, p.adjust) %>%
+  dplyr::mutate(source = "GO:BP")
+
+kegg_selected <- GSEA_KEGG_no_filter_df %>%
+  dplyr::filter(Description %in% kegg_pathways) %>%
+  dplyr::select(Description, NES, p.adjust) %>%
+  dplyr::mutate(source = "KEGG")
+
+# --- Combine and annotate ---
+plot_df <- bind_rows(gobp_selected, kegg_selected) %>%
+  dplyr::mutate(
+    # Significance asterisk label
+    sig_label = dplyr::case_when(
+      p.adjust < 0.0001 ~ "****",
+      p.adjust < 0.001  ~ "***",
+      p.adjust < 0.01   ~ "**",
+      p.adjust < 0.05   ~ "*",
+      TRUE              ~ ""
+    ),
+    # Direction for colouring
+    direction = dplyr::if_else(NES > 0, "Upregulated", "Downregulated"),
+    # Order rows by NES descending (highest at top)
+    Description = forcats::fct_reorder(Description, -NES)
+  )
+
+# Check all pathways were found
+missing <- setdiff(c(gobp_pathways, kegg_pathways), plot_df$Description)
+if (length(missing) > 0) {
+  warning("The following pathways were not found in the data frames:\n",
+          paste(missing, collapse = "\n"))
+}
+
+# --- Plot ---
+enrichment_plot <- ggplot(plot_df, aes(x = NES, y = Description, fill = direction)) +
+  geom_col(width = 0.7) +
+  geom_text(
+    aes(
+      label = sig_label,
+      # Place asterisk just beyond the end of each bar
+      x     = dplyr::if_else(NES > 0, NES + 0.05, NES - 0.05),
+      hjust = dplyr::if_else(NES > 0, 0, 1)
+    ),
+    size   = 4,
+    colour = "black",
+    family = "Helvetica"
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.17))) +
+  geom_text(
+    aes(label = source),
+    x      = 0,
+    hjust  = 0,
+    size   = 2.5,
+    colour = "black",
+    family = "Helvetica",
+    fontface = "italic"
+  ) +
+  scale_fill_manual(
+    values = c("Upregulated" = "firebrick", "Downregulated" = "steelblue")
+  ) +
+  geom_vline(xintercept = 0, colour = "black", linewidth = 0.4) +
+  labs(
+    x    = "Normalised Enrichment Score",
+    y    = NULL,
+    fill = NULL
+  ) +
+  theme_classic(base_size = 11, base_family = "Helvetica") +
+  theme(
+    text             = element_text(family = "Helvetica", colour = "black"),
+    axis.text        = element_text(family = "Helvetica", colour = "black"),
+    axis.title       = element_text(family = "Helvetica", colour = "black"),
+    axis.line        = element_line(colour = "black", linewidth = 0.5),
+    axis.line.y      = element_blank(),  # remove y-axis line; bars sit against centre
+    axis.ticks.y     = element_blank(),
+    panel.grid       = element_blank(),
+    panel.border     = element_blank(),
+    legend.position  = "none",
+    legend.text      = element_text(size = 10)
+  )
+
+
+svg(file.path(out_dir, "GSEA_enrichment_barplot_GATA2_vs_control.svg"),
+    width  = 10,
+    height = 5)
+print(enrichment_plot)
+dev.off()
+
+```
+
+
 # GSEA 5: MSigDB C3 Transcription Factor Targets
 
 ```{r gsea_tft, fig.width = 10, fig.height = 8}
