@@ -1,17 +1,16 @@
-# 20260421_natashaHarvey_gata2_mouse
-Affymetrix Array data processing for Jan's Gata2 2011 assay
+Affymetrix Array data processing for the Gata2 2011 assay
 
 # GATA2 Mouse Microarray Analysis (MoGene-1_0-st-v1)
 
 ## Overview
 
-This project processes Affymetrix Mouse Gene 1.0 ST array (.CEL) files using R (v4.5.2) and Bioconductor. Data are normalized using the Robust Multi-array Average (RMA) method via the `oligo` package.
+This project processes Affymetrix Mouse Gene 1.0 ST array (.CEL) files using R (v4.5.2) and Bioconductor. Data are normalised using the Robust Multi-array Average (RMA) method via the `oligo` package.
 
 ## Data Source
 
 Raw CEL files are stored on a mounted HPC filesystem:
 
-~/hpc_mount/uofaresstor/sacgf/sacgf/molpath/data/analysis/2011JanKazenWadel_Gata2_Array/GATA2 Affy Arrays/Mouse Genearrays
+~/hpc_mount/###
 
 To avoid duplication, symbolic links are used within this project.
 
